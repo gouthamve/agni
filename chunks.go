@@ -132,8 +132,6 @@ func (s *chunkReader) Chunk(ref uint64) (chunks.Chunk, error) {
 			continue
 		}
 
-		fmt.Println(l, len(buf))
-
 		return s.pool.Get(chunks.Encoding(buf[0]), buf[1:1+l])
 	}
 

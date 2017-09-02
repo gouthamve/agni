@@ -1,9 +1,10 @@
 package main
 
 import (
-	"log"
 	"net/http"
+	"os"
 
+	"github.com/go-kit/kit/log"
 	minio "github.com/minio/minio-go"
 	"github.com/pkg/errors"
 	"github.com/prometheus/common/model"
@@ -13,19 +14,24 @@ import (
 )
 
 func startServer(configFile string) {
+	logger := log.NewLogfmtLogger(os.Stdout)
+
 	rcfg, err := loadConfig(configFile)
 	if err != nil {
-		log.Fatalln(err)
+		logger.Log("error", err.Error())
+		return
 	}
 
 	mc, err := minio.New(rcfg.Endpoint, rcfg.AccessKey, rcfg.SecretKey, rcfg.UseSSL)
 	if err != nil {
-		log.Fatalln(err)
+		logger.Log("error", err.Error())
+		return
 	}
 
-	db, err := NewDB(rcfg, mc)
+	db, err := NewDB(rcfg, mc, log.With(logger, "component", "db"))
 	if err != nil {
-		log.Fatalln(err)
+		logger.Log("error", err.Error())
+		return
 	}
 
 	http.HandleFunc("/read", func(w http.ResponseWriter, r *http.Request) {
@@ -55,7 +61,7 @@ func startServer(configFile string) {
 		return
 	})
 
-	log.Fatalln(http.ListenAndServe(":9091", nil))
+	http.ListenAndServe(":9091", nil)
 }
 
 func queryToMatrix(rq *remote.Query, db *DB) (model.Matrix, error) {

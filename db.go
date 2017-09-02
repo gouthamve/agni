@@ -7,7 +7,10 @@ import (
 	"io/ioutil"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
+	"github.com/go-kit/kit/log"
 	minio "github.com/minio/minio-go"
 	"github.com/pkg/errors"
 	"github.com/prometheus/tsdb"
@@ -20,11 +23,20 @@ const metaSuffix = "/meta.json"
 type DB struct {
 	blocks []*s3Block
 
+	mtx sync.RWMutex
+
 	client *minio.Client
+	bucket string
+
+	logger log.Logger
 }
 
 // NewDB is TODO stuff.
-func NewDB(rcfg remoteConfig, mc *minio.Client) (*DB, error) {
+func NewDB(rcfg remoteConfig, mc *minio.Client, logger log.Logger) (*DB, error) {
+	if logger == nil {
+		logger = log.NewNopLogger()
+	}
+
 	blocks, err := getStorageBlocks(mc, rcfg.Bucket)
 	if err != nil {
 		return nil, errors.Wrap(err, "get storage blocks")
@@ -33,6 +45,8 @@ func NewDB(rcfg remoteConfig, mc *minio.Client) (*DB, error) {
 	db := &DB{
 		blocks: make([]*s3Block, 0, len(blocks)),
 		client: mc,
+		bucket: rcfg.Bucket,
+		logger: logger,
 	}
 	for _, block := range blocks {
 		sb, err := newS3Block(mc, rcfg.Bucket, block)
@@ -47,7 +61,54 @@ func NewDB(rcfg remoteConfig, mc *minio.Client) (*DB, error) {
 		return db.blocks[i].meta.MinTime < db.blocks[j].meta.MinTime
 	})
 
+	go db.run(1 * time.Minute)
 	return db, nil
+}
+
+func (s *DB) run(d time.Duration) {
+	logger := log.With(s.logger, "caller", "s.run()")
+
+	t := time.Tick(d)
+	for _ = range t {
+		m := make(map[string]struct{})
+		s.mtx.RLock()
+		for _, b := range s.blocks {
+			m[b.key] = struct{}{}
+		}
+		s.mtx.RUnlock()
+
+		blocks, err := getStorageBlocks(s.client, s.bucket)
+		if err != nil {
+			logger.Log("error", err.Error())
+			continue
+		}
+
+		newBlocks := make([]*s3Block, 0)
+		for _, b := range blocks {
+			if _, ok := m[b]; ok {
+				continue
+			}
+
+			sb, err := newS3Block(s.client, s.bucket, b)
+			if err != nil {
+				logger.Log("error", err.Error())
+				continue
+			}
+			newBlocks = append(newBlocks, sb)
+			logger.Log("adding block", sb.key)
+		}
+
+		if len(newBlocks) == 0 {
+			continue
+		}
+
+		s.mtx.Lock()
+		s.blocks = append(s.blocks, newBlocks...)
+		sort.Slice(s.blocks, func(i, j int) bool {
+			return s.blocks[i].meta.MinTime < s.blocks[j].meta.MinTime
+		})
+		s.mtx.Unlock()
+	}
 }
 
 type s3Block struct {
@@ -117,12 +178,14 @@ type querier struct {
 // Querier returns a new querier over the data partition for the given time range.
 // A goroutine must not handle more than one open Querier.
 func (s *DB) Querier(mint, maxt int64) tsdb.Querier {
+	s.mtx.RLock()
 	sq := &querier{
 		blocks: make([]tsdb.Querier, 0, len(s.blocks)),
 	}
 	for _, b := range s.blocks {
 		sq.blocks = append(sq.blocks, b.Querier(mint, maxt))
 	}
+	s.mtx.RUnlock()
 
 	return sq
 }
