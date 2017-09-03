@@ -35,6 +35,7 @@ func startServer(configFile string) {
 	}
 
 	http.HandleFunc("/read", func(w http.ResponseWriter, r *http.Request) {
+		logger.Log("debug", "serving query")
 		req, err := remote.DecodeReadRequest(r)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -61,6 +62,7 @@ func startServer(configFile string) {
 		return
 	})
 
+	logger.Log("msg", "starting server")
 	http.ListenAndServe(":9091", nil)
 }
 

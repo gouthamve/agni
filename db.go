@@ -6,7 +6,6 @@ import (
 	"io"
 	"io/ioutil"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -54,6 +53,7 @@ func NewDB(rcfg remoteConfig, mc *minio.Client, logger log.Logger) (*DB, error) 
 			return nil, errors.Wrapf(err, "new s3 block: %q", block)
 		}
 
+		logger.Log("debug", "adding block "+sb.key)
 		db.blocks = append(db.blocks, sb)
 	}
 
@@ -82,6 +82,7 @@ func (s *DB) run(d time.Duration) {
 			logger.Log("error", err.Error())
 			continue
 		}
+		logger.Log("debug", "checking for new blocks.", "localBlocks", len(m), "remoteBlocks", len(blocks))
 
 		newBlocks := make([]*s3Block, 0)
 		for _, b := range blocks {
@@ -160,7 +161,7 @@ func newS3Block(mc *minio.Client, bucket, key string) (*s3Block, error) {
 }
 
 func (b *s3Block) Querier(mint, maxt int64) tsdb.Querier {
-	return tsdb.NewBlockQuerier(b.indexr, b.chunkr, nopTombstones{}, mint, maxt)
+	return NewBlockQuerier(b.indexr, b.chunkr, nopTombstones{}, mint, maxt)
 }
 
 type nopTombstones struct{}
@@ -183,10 +184,12 @@ func (s *DB) Querier(mint, maxt int64) tsdb.Querier {
 		blocks: make([]tsdb.Querier, 0, len(s.blocks)),
 	}
 	for _, b := range s.blocks {
-		sq.blocks = append(sq.blocks, b.Querier(mint, maxt))
+		// Check interval overlap.
+		if b.meta.MinTime <= maxt && mint <= b.meta.MaxTime {
+			sq.blocks = append(sq.blocks, b.Querier(mint, maxt))
+		}
 	}
 	s.mtx.RUnlock()
-
 	return sq
 }
 
@@ -240,37 +243,3 @@ func (q *querier) Close() error {
 	}
 	return closeAll(cs...)
 }
-
-func mergeStrings(a, b []string) []string {
-	maxl := len(a)
-	if len(b) > len(a) {
-		maxl = len(b)
-	}
-	res := make([]string, 0, maxl*10/9)
-
-	for len(a) > 0 && len(b) > 0 {
-		d := strings.Compare(a[0], b[0])
-
-		if d == 0 {
-			res = append(res, a[0])
-			a, b = a[1:], b[1:]
-		} else if d < 0 {
-			res = append(res, a[0])
-			a = a[1:]
-		} else if d > 0 {
-			res = append(res, b[0])
-			b = b[1:]
-		}
-	}
-
-	// Append all remaining elements.
-	res = append(res, a...)
-	res = append(res, b...)
-	return res
-}
-
-type nopSeriesSet struct{}
-
-func (nopSeriesSet) Next() bool      { return false }
-func (nopSeriesSet) At() tsdb.Series { return nil }
-func (nopSeriesSet) Err() error      { return nil }

@@ -41,6 +41,10 @@ func startShipper(configFile string) {
 		}
 		blocks := make([]string, 0, len(blockDirs))
 		for _, bd := range blockDirs {
+			if bd.Name() == "wal" {
+				continue
+			}
+
 			if strings.HasSuffix(bd.Name(), ".tmp") {
 				continue
 			}
