@@ -14,6 +14,11 @@ import (
 
 const chunkSuffix = "/chunks/"
 
+var (
+	errInvalidSize = fmt.Errorf("invalid size")
+	errInvalidFlag = fmt.Errorf("invalid flag")
+)
+
 // chunkReader implements a SeriesReader for a serialized byte stream
 // of series data.
 type chunkReader struct {

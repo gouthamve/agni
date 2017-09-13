@@ -3,13 +3,95 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 
+	"github.com/gouthamve/agni/pkg/errgroup"
 	"github.com/prometheus/tsdb"
 	"github.com/prometheus/tsdb/chunks"
 	"github.com/prometheus/tsdb/labels"
 )
+
+// querier aggregates querying results from time blocks within
+// a single partition.
+type querier struct {
+	blocks []tsdb.Querier
+}
+
+// Querier returns a new querier over the data partition for the given time range.
+// A goroutine must not handle more than one open Querier.
+func (s *DB) Querier(mint, maxt int64) tsdb.Querier {
+	s.mtx.RLock()
+	sq := &querier{
+		blocks: make([]tsdb.Querier, 0, len(s.blocks)),
+	}
+	for _, b := range s.blocks {
+		// Check interval overlap.
+		if b.Meta().MinTime <= maxt && mint <= b.Meta().MaxTime {
+			sq.blocks = append(sq.blocks, tsdb.NewBlockQuerier(
+				b.Index(),
+				b.Chunks(),
+				b.Tombstones(),
+				mint,
+				maxt,
+			))
+		}
+	}
+	s.mtx.RUnlock()
+	return sq
+}
+
+func (q *querier) LabelValues(n string) ([]string, error) {
+	return q.lvals(q.blocks, n)
+}
+
+func (q *querier) lvals(qs []tsdb.Querier, n string) ([]string, error) {
+	if len(qs) == 0 {
+		return nil, nil
+	}
+	if len(qs) == 1 {
+		return qs[0].LabelValues(n)
+	}
+	l := len(qs) / 2
+	s1, err := q.lvals(qs[:l], n)
+	if err != nil {
+		return nil, err
+	}
+	s2, err := q.lvals(qs[l:], n)
+	if err != nil {
+		return nil, err
+	}
+	return mergeStrings(s1, s2), nil
+}
+
+func (q *querier) LabelValuesFor(string, labels.Label) ([]string, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (q *querier) Select(ms ...labels.Matcher) tsdb.SeriesSet {
+	return q.sel(q.blocks, ms)
+
+}
+
+func (q *querier) sel(qs []tsdb.Querier, ms []labels.Matcher) tsdb.SeriesSet {
+	if len(qs) == 0 {
+		return nopSeriesSet{}
+	}
+	if len(qs) == 1 {
+		return qs[0].Select(ms...)
+	}
+	l := len(qs) / 2
+	return tsdb.NewMergedSeriesSet(q.sel(qs[:l], ms), q.sel(qs[l:], ms))
+}
+
+func (q *querier) Close() error {
+	cs := make([]io.Closer, 0, len(q.blocks))
+	for _, b := range q.blocks {
+		cs = append(cs, b)
+	}
+	return closeAll(cs...)
+}
 
 // NewBlockQuerier returns a querier against the readers.
 func NewBlockQuerier(ir tsdb.IndexReader, cr tsdb.ChunkReader, tr tsdb.TombstoneReader, mint, maxt int64) tsdb.Querier {
@@ -471,58 +553,27 @@ func (s *populatedChunkSeries) Next() bool {
 }
 
 func populateSeriesInParallel(l []chunkSeries, cr tsdb.ChunkReader, workers int) error {
-	errChan := make(chan error)
-	chunksChan := make(chan []tsdb.ChunkMeta)
+	g, _ := errgroup.New(context.Background(), workers)
 
-	// TODO: PLEASE CLEAN THIS UP.
-	for i := 0; i < workers; i++ {
-		go func(errChan chan<- error, chunksChan <-chan []tsdb.ChunkMeta, cr tsdb.ChunkReader) {
-			for chunks := range chunksChan {
-				// TODO: Make one big get request.
-				for j := range chunks {
-					c := &chunks[j]
+	for i := range l {
+		i := i
+		g.Add(func() error {
+			c := l[i]
+			fmt.Println(c.Labels())
+			for j := range c.chunks {
+				c := &c.chunks[j]
 
-					var err error
-					c.Chunk, err = cr.Chunk(c.Ref)
-					if err != nil {
-						errChan <- err
-					}
+				var err error
+				c.Chunk, err = cr.Chunk(c.Ref)
+				if err != nil {
+					return err
 				}
 			}
-		}(errChan, chunksChan, cr)
+			return nil
+		})
 	}
 
-	for _, cs := range l {
-		select {
-		case err := <-errChan:
-			close(chunksChan)
-			return err
-		case chunksChan <- cs.chunks:
-		}
-	}
-
-	return nil
-}
-
-func contextChunkReader(ctx context.Context, cr tsdb.ChunkReader, ref uint64) (chunks.Chunk, error) {
-	resChan := make(chan struct {
-		chk chunks.Chunk
-		err error
-	})
-	go func() {
-		chk, err := cr.Chunk(ref)
-		resChan <- struct {
-			chk chunks.Chunk
-			err error
-		}{chk, err}
-	}()
-
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case res := <-resChan:
-		return res.chk, res.err
-	}
+	return g.Run()
 }
 
 // blockSeriesSet is a set of series from an inverted index query.
@@ -833,3 +884,21 @@ Outer:
 func (it *deletedIterator) Err() error {
 	return it.it.Err()
 }
+
+type nopTombstones struct{}
+
+func (nopTombstones) Get(ref uint64) tsdb.Intervals {
+	return nil
+}
+
+// errPostings is an empty iterator that always errors.
+type errPostings struct {
+	err error
+}
+
+func (e errPostings) Next() bool       { return false }
+func (e errPostings) Seek(uint64) bool { return false }
+func (e errPostings) At() uint64       { return 0 }
+func (e errPostings) Err() error       { return e.err }
+
+var emptyPostings = errPostings{}

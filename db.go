@@ -2,30 +2,36 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 	"io/ioutil"
+	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
 
+	"github.com/coreos/etcd/pkg/fileutil"
 	"github.com/go-kit/kit/log"
 	minio "github.com/minio/minio-go"
+	"github.com/oklog/ulid"
 	"github.com/pkg/errors"
 	"github.com/prometheus/tsdb"
-	"github.com/prometheus/tsdb/labels"
 )
 
-const metaSuffix = "/meta.json"
+const (
+	metaSuffix  = "/meta.json"
+	indexSuffix = "/index"
+)
 
 // DB is the TODO struct.
 type DB struct {
-	blocks []*s3Block
+	blocks []tsdb.DiskBlock
 
 	mtx sync.RWMutex
 
 	client *minio.Client
 	bucket string
+	dir    string
 
 	logger log.Logger
 }
@@ -36,30 +42,17 @@ func NewDB(rcfg remoteConfig, mc *minio.Client, logger log.Logger) (*DB, error) 
 		logger = log.NewNopLogger()
 	}
 
-	blocks, err := getStorageBlocks(mc, rcfg.Bucket)
-	if err != nil {
-		return nil, errors.Wrap(err, "get storage blocks")
-	}
-
 	db := &DB{
-		blocks: make([]*s3Block, 0, len(blocks)),
+		blocks: make([]tsdb.DiskBlock, 0),
 		client: mc,
 		bucket: rcfg.Bucket,
 		logger: logger,
-	}
-	for _, block := range blocks {
-		sb, err := newS3Block(mc, rcfg.Bucket, block)
-		if err != nil {
-			return nil, errors.Wrapf(err, "new s3 block: %q", block)
-		}
-
-		logger.Log("debug", "adding block "+sb.key)
-		db.blocks = append(db.blocks, sb)
+		dir:    "data", // TODO: Make it a parameter.
 	}
 
-	sort.Slice(db.blocks, func(i, j int) bool {
-		return db.blocks[i].meta.MinTime < db.blocks[j].meta.MinTime
-	})
+	if err := db.reload(); err != nil {
+		return nil, err
+	}
 
 	go db.run(1 * time.Minute)
 	return db, nil
@@ -73,7 +66,7 @@ func (s *DB) run(d time.Duration) {
 		m := make(map[string]struct{})
 		s.mtx.RLock()
 		for _, b := range s.blocks {
-			m[b.key] = struct{}{}
+			m[reverse(b.Meta().ULID.String())] = struct{}{}
 		}
 		s.mtx.RUnlock()
 
@@ -84,162 +77,194 @@ func (s *DB) run(d time.Duration) {
 		}
 		logger.Log("debug", "checking for new blocks.", "localBlocks", len(m), "remoteBlocks", len(blocks))
 
-		newBlocks := make([]*s3Block, 0)
+		newBlocks := 0
 		for _, b := range blocks {
 			if _, ok := m[b]; ok {
 				continue
 			}
 
-			sb, err := newS3Block(s.client, s.bucket, b)
-			if err != nil {
-				logger.Log("error", err.Error())
+			folder := filepath.Join(s.dir, reverse(b))
+			tmpFolder := folder + ".tmp"
+
+			if err := os.RemoveAll(tmpFolder); err != nil {
+				logger.Log("msg", "removing any existing tmpFolder", "error", err.Error())
 				continue
 			}
-			newBlocks = append(newBlocks, sb)
-			logger.Log("adding block", sb.key)
+
+			// Download the meta and index files.
+			if err := s.client.FGetObject(s.bucket, b+indexSuffix, filepath.Join(tmpFolder, indexSuffix)); err != nil {
+				logger.Log("msg", "download index file", "key", b, "error", err.Error())
+				continue
+			}
+
+			if err := s.client.FGetObject(s.bucket, b+metaSuffix, filepath.Join(tmpFolder, metaSuffix)); err != nil {
+				logger.Log("msg", "download meta file", "error", err.Error())
+				continue
+			}
+
+			if err := renameFile(tmpFolder, folder); err != nil {
+				logger.Log("msg", "rename temp folder", "error", err.Error())
+				continue
+			}
+
+			newBlocks++
+			if err := s.reload(); err != nil {
+				logger.Log("msg", "reloading blocks", "error", err.Error())
+			}
 		}
 
-		if len(newBlocks) == 0 {
+		if newBlocks == 0 {
 			continue
 		}
 
-		s.mtx.Lock()
-		s.blocks = append(s.blocks, newBlocks...)
-		sort.Slice(s.blocks, func(i, j int) bool {
-			return s.blocks[i].meta.MinTime < s.blocks[j].meta.MinTime
-		})
-		s.mtx.Unlock()
+		// Check if we need to reload here.
+		if err := s.reload(); err != nil {
+			logger.Log("msg", "reloading blocks", "error", err.Error())
+		}
 	}
 }
 
-type s3Block struct {
-	key  string
-	meta tsdb.BlockMeta
-
-	indexr *indexReader
-	chunkr *chunkReader
+func (db *DB) getBlock(id ulid.ULID) (tsdb.DiskBlock, bool) {
+	for _, b := range db.blocks {
+		if b.Meta().ULID == id {
+			return b, true
+		}
+	}
+	return nil, false
 }
 
-func newS3Block(mc *minio.Client, bucket, key string) (*s3Block, error) {
-	sb := &s3Block{
-		key: key,
-	}
+func (db *DB) reload() error {
+	var cs []io.Closer
+	defer func() { closeAll(cs...) }()
 
-	// Read the metafile.
-	obj, err := mc.GetObject(bucket, key+metaSuffix)
+	dirs, err := blockDirs(db.dir)
 	if err != nil {
-		return nil, errors.Wrap(err, "get meta")
+		return errors.Wrap(err, "find blocks")
 	}
-	defer obj.Close()
+	var (
+		blocks []tsdb.DiskBlock
+		exist  = map[ulid.ULID]struct{}{}
+	)
 
-	d := json.NewDecoder(obj)
-	if err := d.Decode(&sb.meta); err != nil {
-		return nil, errors.Wrap(err, "decode meta file")
-	}
+	for _, dir := range dirs {
+		meta, err := readMetaFile(dir)
+		if err != nil {
+			return errors.Wrapf(err, "read meta information %s", dir)
+		}
 
-	// Read the index file.
-	obj, err = mc.GetObject(bucket, key+indexSuffix)
-	if err != nil {
-		return nil, errors.Wrap(err, "get index")
-	}
-	defer obj.Close()
-	buf, err := ioutil.ReadAll(obj)
-	if err != nil {
-		return nil, errors.Wrap(err, "read index file")
-	}
-	sb.indexr, err = newIndexReader(buf)
-	if err != nil {
-		return nil, errors.Wrap(err, "new index reader")
-	}
+		b, ok := db.getBlock(meta.ULID)
+		if !ok {
+			b, err = newS3Block(db.client, db.bucket, reverse(meta.ULID.String()), dir)
+			if err != nil {
+				return errors.Wrapf(err, "open block %s", dir)
+			}
+		}
 
-	sb.chunkr, err = newChunkReader(mc, bucket, key, nil)
-	if err != nil {
-		return nil, errors.Wrap(err, "new chunk reader")
+		blocks = append(blocks, b)
+		exist[meta.ULID] = struct{}{}
 	}
 
-	return sb, nil
-}
+	if err := validateBlockSequence(blocks); err != nil {
+		return errors.Wrap(err, "invalid block sequence")
+	}
 
-func (b *s3Block) Querier(mint, maxt int64) tsdb.Querier {
-	return NewBlockQuerier(b.indexr, b.chunkr, nopTombstones{}, mint, maxt)
-}
+	// Close all opened blocks that no longer exist after we returned all locks.
+	// TODO(fabxc: probably races with querier still reading from them. Can
+	// we just abandon them and have the open FDs be GC'd automatically eventually?
+	for _, b := range db.blocks {
+		if _, ok := exist[b.Meta().ULID]; !ok {
+			cs = append(cs, b)
+		}
+	}
 
-type nopTombstones struct{}
-
-func (nopTombstones) Get(ref uint32) tsdb.Intervals {
+	db.mtx.Lock()
+	db.blocks = blocks
+	db.mtx.Unlock()
 	return nil
 }
 
-// querier aggregates querying results from time blocks within
-// a single partition.
-type querier struct {
-	blocks []tsdb.Querier
-}
-
-// Querier returns a new querier over the data partition for the given time range.
-// A goroutine must not handle more than one open Querier.
-func (s *DB) Querier(mint, maxt int64) tsdb.Querier {
-	s.mtx.RLock()
-	sq := &querier{
-		blocks: make([]tsdb.Querier, 0, len(s.blocks)),
+func blockDirs(dir string) ([]string, error) {
+	files, err := ioutil.ReadDir(dir)
+	if err != nil {
+		return nil, err
 	}
-	for _, b := range s.blocks {
-		// Check interval overlap.
-		if b.meta.MinTime <= maxt && mint <= b.meta.MaxTime {
-			sq.blocks = append(sq.blocks, b.Querier(mint, maxt))
+	var dirs []string
+
+	for _, fi := range files {
+		if isBlockDir(fi) {
+			dirs = append(dirs, filepath.Join(dir, fi.Name()))
 		}
 	}
-	s.mtx.RUnlock()
-	return sq
+	return dirs, nil
 }
 
-func (q *querier) LabelValues(n string) ([]string, error) {
-	return q.lvals(q.blocks, n)
+func isBlockDir(fi os.FileInfo) bool {
+	if !fi.IsDir() {
+		return false
+	}
+	_, err := ulid.Parse(fi.Name())
+	return err == nil
 }
 
-func (q *querier) lvals(qs []tsdb.Querier, n string) ([]string, error) {
-	if len(qs) == 0 {
-		return nil, nil
+func validateBlockSequence(bs []tsdb.DiskBlock) error {
+	if len(bs) == 0 {
+		return nil
 	}
-	if len(qs) == 1 {
-		return qs[0].LabelValues(n)
+	sort.Slice(bs, func(i, j int) bool {
+		return bs[i].Meta().MinTime < bs[j].Meta().MinTime
+	})
+	prev := bs[0]
+	for _, b := range bs[1:] {
+		if b.Meta().MinTime < prev.Meta().MaxTime {
+			return errors.Errorf("block time ranges overlap (%d, %d)", b.Meta().MinTime, prev.Meta().MaxTime)
+		}
 	}
-	l := len(qs) / 2
-	s1, err := q.lvals(qs[:l], n)
+	return nil
+}
+
+type blockMeta struct {
+	Version int `json:"version"`
+
+	*tsdb.BlockMeta
+}
+
+func readMetaFile(dir string) (*tsdb.BlockMeta, error) {
+	b, err := ioutil.ReadFile(filepath.Join(dir, metaSuffix))
 	if err != nil {
 		return nil, err
 	}
-	s2, err := q.lvals(qs[l:], n)
-	if err != nil {
+	var m blockMeta
+
+	if err := json.Unmarshal(b, &m); err != nil {
 		return nil, err
 	}
-	return mergeStrings(s1, s2), nil
-}
-
-func (q *querier) LabelValuesFor(string, labels.Label) ([]string, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-
-func (q *querier) Select(ms ...labels.Matcher) tsdb.SeriesSet {
-	return q.sel(q.blocks, ms)
-
-}
-
-func (q *querier) sel(qs []tsdb.Querier, ms []labels.Matcher) tsdb.SeriesSet {
-	if len(qs) == 0 {
-		return nopSeriesSet{}
+	if m.Version != 1 {
+		return nil, errors.Errorf("unexpected meta file version %d", m.Version)
 	}
-	if len(qs) == 1 {
-		return qs[0].Select(ms...)
-	}
-	l := len(qs) / 2
-	return tsdb.NewMergedSeriesSet(q.sel(qs[:l], ms), q.sel(qs[l:], ms))
+
+	return m.BlockMeta, nil
 }
 
-func (q *querier) Close() error {
-	cs := make([]io.Closer, 0, len(q.blocks))
-	for _, b := range q.blocks {
-		cs = append(cs, b)
+func renameFile(from, to string) error {
+	if err := os.RemoveAll(to); err != nil {
+		return err
 	}
-	return closeAll(cs...)
+	if err := os.Rename(from, to); err != nil {
+		return err
+	}
+
+	// Directory was renamed; sync parent dir to persist rename.
+	pdir, err := fileutil.OpenDir(filepath.Dir(to))
+	if err != nil {
+		return err
+	}
+	defer pdir.Close()
+
+	if err = fileutil.Fsync(pdir); err != nil {
+		return err
+	}
+	if err = pdir.Close(); err != nil {
+		return err
+	}
+	return nil
 }
