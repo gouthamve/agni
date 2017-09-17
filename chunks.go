@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"sort"
 
+	"github.com/gouthamve/agni/pkg/errgroup"
 	minio "github.com/minio/minio-go"
 	"github.com/pkg/errors"
 	"github.com/prometheus/tsdb"
@@ -18,6 +20,17 @@ var (
 	errInvalidSize = fmt.Errorf("invalid size")
 	errInvalidFlag = fmt.Errorf("invalid flag")
 )
+
+// ChunkReader provides reading access of serialized time series data.
+type ChunkReader interface {
+	// Chunk returns the series data chunk with the given reference.
+	Chunk(ref uint64) (chunks.Chunk, error)
+
+	Populate(cs []tsdb.ChunkMeta) error
+
+	// Close releases all underlying resources of the reader.
+	Close() error
+}
 
 // chunkReader implements a SeriesReader for a serialized byte stream
 // of series data.
@@ -141,6 +154,91 @@ func (s *chunkReader) Chunk(ref uint64) (chunks.Chunk, error) {
 	}
 
 	return nil, nil
+}
+
+func (s *chunkReader) Populate(cs []tsdb.ChunkMeta) error {
+	if len(cs) == 0 {
+		return nil
+	}
+
+	gps := [][]*tsdb.ChunkMeta{}
+	gp := []*tsdb.ChunkMeta{}
+
+	seq := int(cs[0].Ref >> 32)
+	if seq >= len(s.bs) {
+		return errors.Errorf("reference sequence %d out of range", seq)
+	}
+
+	for _, c := range cs {
+		if int(c.Ref>>32) == seq {
+			gp = append(gp, &c)
+			continue
+		}
+
+		gps = append(gps, gp)
+		seq = int(c.Ref >> 32)
+		gp = []*tsdb.ChunkMeta{&c}
+	}
+
+	g, _ := errgroup.New(context.Background(), len(gps))
+
+	for i := range gps {
+		i := i
+		g.Add(func() error {
+			return s.populate(gps[i])
+		})
+	}
+
+	return g.Run()
+}
+
+var maxChunkLen = 1 << 12
+
+func (s *chunkReader) populate(cs []*tsdb.ChunkMeta) error {
+	if len(cs) == 0 {
+		return nil
+	}
+
+	seq := int(cs[0].Ref >> 32)
+	startRef := int((cs[0].Ref << 32) >> 32)
+	endRef := int((cs[len(cs)-1].Ref<<32)>>32) + maxChunkLen
+
+	b := s.bs[seq]
+	oi := s.ois[seq]
+	if int64(endRef) >= oi.Size {
+		// TODO: start and endRef == int64??
+		endRef = int(oi.Size)
+	}
+
+	buf := make([]byte, endRef-startRef)
+	n, err := b.ReadAt(buf, int64(startRef))
+	if err != nil {
+		if err != io.EOF {
+			return err
+		}
+
+		buf = buf[:n]
+	}
+
+	if len(buf) == 0 {
+		fmt.Println("Error buf=0", s.ois[seq], cs[0].Ref)
+		// TODO: FIXME
+	}
+
+	for _, c := range cs {
+		l, n := binary.Uvarint(buf)
+		if n < 0 {
+			return fmt.Errorf("reading chunk length failed")
+		}
+
+		buf = buf[n:]
+		c.Chunk, err = s.pool.Get(chunks.Encoding(buf[0]), buf[1:1+l])
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func closeAll(cs ...io.Closer) error {

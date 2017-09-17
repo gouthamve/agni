@@ -94,7 +94,7 @@ func (q *querier) Close() error {
 }
 
 // NewBlockQuerier returns a querier against the readers.
-func NewBlockQuerier(ir tsdb.IndexReader, cr tsdb.ChunkReader, tr tsdb.TombstoneReader, mint, maxt int64) tsdb.Querier {
+func NewBlockQuerier(ir tsdb.IndexReader, cr ChunkReader, tr tsdb.TombstoneReader, mint, maxt int64) tsdb.Querier {
 	return &blockQuerier{
 		index:      ir,
 		chunks:     cr,
@@ -108,7 +108,7 @@ func NewBlockQuerier(ir tsdb.IndexReader, cr tsdb.ChunkReader, tr tsdb.Tombstone
 // blockQuerier provides querying access to a single block database.
 type blockQuerier struct {
 	index      tsdb.IndexReader
-	chunks     tsdb.ChunkReader
+	chunks     ChunkReader
 	tombstones tsdb.TombstoneReader
 
 	mint, maxt int64
@@ -485,13 +485,13 @@ Outer:
 // given time range.
 type populatedChunkSeries struct {
 	set        chunkSeriesSet
-	chunks     tsdb.ChunkReader
+	chunks     ChunkReader
 	mint, maxt int64
 
 	list *listChunkSeries
 }
 
-func newPopulatedChunkSeries(set chunkSeriesSet, cr tsdb.ChunkReader, mint, maxt int64) (*populatedChunkSeries, error) {
+func newPopulatedChunkSeries(set chunkSeriesSet, cr ChunkReader, mint, maxt int64) (*populatedChunkSeries, error) {
 	p := &populatedChunkSeries{
 		set:    set,
 		chunks: cr,
@@ -514,7 +514,6 @@ func (s *populatedChunkSeries) populate() error {
 			chks = chks[1:]
 		}
 
-		// TODO: seriealise this shizz.
 		for i := range chks {
 			// Break out at the first chunk that has no overlap with mint, maxt.
 			if chks[i].MinTime > s.maxt {
@@ -535,7 +534,7 @@ func (s *populatedChunkSeries) populate() error {
 		})
 	}
 
-	if err := populateSeriesInParallel(l, s.chunks, 10); err != nil {
+	if err := populateSeriesInParallel(l, s.chunks, 100); err != nil {
 		return err
 	}
 
@@ -552,22 +551,16 @@ func (s *populatedChunkSeries) Next() bool {
 	return s.list.Next()
 }
 
-func populateSeriesInParallel(l []chunkSeries, cr tsdb.ChunkReader, workers int) error {
+func populateSeriesInParallel(l []chunkSeries, cr ChunkReader, workers int) error {
 	g, _ := errgroup.New(context.Background(), workers)
 
 	for i := range l {
 		i := i
 		g.Add(func() error {
 			c := l[i]
-			fmt.Println(c.Labels())
-			for j := range c.chunks {
-				c := &c.chunks[j]
-
-				var err error
-				c.Chunk, err = cr.Chunk(c.Ref)
-				if err != nil {
-					return err
-				}
+			fmt.Println(c.Labels(), ".")
+			if err := cr.Populate(c.chunks); err != nil {
+				return err
 			}
 			return nil
 		})

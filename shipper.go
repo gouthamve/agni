@@ -2,13 +2,15 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/go-kit/kit/log"
+	"github.com/go-kit/kit/log/level"
 	minio "github.com/minio/minio-go"
 	"github.com/pkg/errors"
 	"github.com/prometheus/tsdb"
@@ -16,20 +18,27 @@ import (
 
 var prefix = "promblock-"
 
-func startShipper(configFile string) {
+func startShipper(configFile string, logger log.Logger) {
+	if logger == nil {
+		logger = log.NewNopLogger()
+	}
+
 	rcfg, err := loadConfig(configFile)
 	if err != nil {
-		log.Fatalln(err)
+		level.Error(logger).Log("msg", "load config", "error", err.Error())
+		os.Exit(1)
 	}
 
 	mc, err := minio.New(rcfg.Endpoint, rcfg.AccessKey, rcfg.SecretKey, rcfg.UseSSL)
 	if err != nil {
-		log.Fatalln(err)
+		level.Error(logger).Log("msg", "initialise minio client", "error", err.Error())
+		os.Exit(1)
 	}
 
-	s, err := newShipper(mc, rcfg.Bucket)
+	s, err := newShipper(mc, rcfg.Bucket, log.With(logger, "component", "shipper"))
 	if err != nil {
-		log.Fatalln(err)
+		level.Error(logger).Log("msg", "initialise shipper", "error", err.Error())
+		os.Exit(1)
 	}
 
 	ticker := time.NewTicker(5 * time.Second)
@@ -37,7 +46,8 @@ func startShipper(configFile string) {
 	for range ticker.C {
 		blockDirs, err := ioutil.ReadDir(".")
 		if err != nil {
-			log.Fatalln(err)
+			level.Error(logger).Log("error", err.Error())
+			os.Exit(1)
 		}
 		blocks := make([]string, 0, len(blockDirs))
 		for _, bd := range blockDirs {
@@ -54,12 +64,14 @@ func startShipper(configFile string) {
 
 			byt, err := ioutil.ReadFile(filepath.Join(bd.Name(), "meta.json"))
 			if err != nil {
-				log.Fatalln(err)
+				level.Error(logger).Log("msg", "load config", "error", err.Error())
+				os.Exit(1)
 			}
 
 			var bm tsdb.BlockMeta
 			if err := json.Unmarshal(byt, &bm); err != nil {
-				log.Fatalln(err)
+				level.Error(logger).Log("msg", "load config", "error", err.Error())
+				os.Exit(1)
 			}
 
 			if bm.Compaction.Level == 1 {
@@ -68,7 +80,8 @@ func startShipper(configFile string) {
 		}
 
 		if err := s.shipBlocks(blocks); err != nil {
-			log.Fatalln(err)
+			level.Error(logger).Log("msg", "load config", "error", err.Error())
+			os.Exit(1)
 		}
 	}
 }
@@ -76,11 +89,12 @@ func startShipper(configFile string) {
 type shipper struct {
 	client *minio.Client
 	bucket string
+	logger log.Logger
 
 	blocks map[string]struct{}
 }
 
-func newShipper(mc *minio.Client, bucket string) (*shipper, error) {
+func newShipper(mc *minio.Client, bucket string, logger log.Logger) (*shipper, error) {
 	blocks, err := getStorageBlocks(mc, bucket)
 	if err != nil {
 		return nil, err
@@ -96,6 +110,7 @@ func newShipper(mc *minio.Client, bucket string) (*shipper, error) {
 		client: mc,
 		bucket: bucket,
 		blocks: existing,
+		logger: logger,
 	}, nil
 }
 
@@ -162,8 +177,7 @@ func (s *shipper) shipBlocks(blocks []string) error {
 			return err
 		}
 
-		log.Printf("added block %q\n", blockKey)
-
+		level.Info(s.logger).Log("msg", fmt.Sprintf("added block %q\n", blockKey))
 		s.blocks[block] = struct{}{}
 	}
 

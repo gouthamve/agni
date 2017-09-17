@@ -398,6 +398,18 @@
 			"revisionTime": "2017-08-27T18:38:49Z"
 		},
 		{
+			"checksumSHA1": "Yseprf8kAFr/s7wztkQnrFuFN+8=",
+			"path": "github.com/prometheus/common/promlog",
+			"revision": "2f17f4a9d485bf34b4bfaccc273805040e4f86c8",
+			"revisionTime": "2017-09-08T16:18:22Z"
+		},
+		{
+			"checksumSHA1": "1H28FCxsaAIm6kvue+Wfdd8Lq6M=",
+			"path": "github.com/prometheus/common/promlog/flag",
+			"revision": "2f17f4a9d485bf34b4bfaccc273805040e4f86c8",
+			"revisionTime": "2017-09-08T16:18:22Z"
+		},
+		{
 			"checksumSHA1": "Yyg/3nrbmiSL8eQnPisYWINAxqw=",
 			"path": "github.com/prometheus/procfs",
 			"revision": "65c1f6f8f0fc1e2185eb9863a3bc751496404259",

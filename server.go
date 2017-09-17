@@ -2,9 +2,9 @@ package main
 
 import (
 	"net/http"
-	"os"
 
 	"github.com/go-kit/kit/log"
+	"github.com/go-kit/kit/log/level"
 	minio "github.com/minio/minio-go"
 	"github.com/pkg/errors"
 	"github.com/prometheus/common/model"
@@ -13,29 +13,27 @@ import (
 	"github.com/prometheus/tsdb/labels"
 )
 
-func startServer(configFile string) {
-	logger := log.NewLogfmtLogger(os.Stdout)
-
+func startServer(configFile string, logger log.Logger) {
 	rcfg, err := loadConfig(configFile)
 	if err != nil {
-		logger.Log("error", err.Error())
+		level.Error(logger).Log("error", err.Error())
 		return
 	}
 
 	mc, err := minio.New(rcfg.Endpoint, rcfg.AccessKey, rcfg.SecretKey, rcfg.UseSSL)
 	if err != nil {
-		logger.Log("error", err.Error())
+		level.Error(logger).Log("error", err.Error())
 		return
 	}
 
 	db, err := NewDB(rcfg, mc, log.With(logger, "component", "db"))
 	if err != nil {
-		logger.Log("error", err.Error())
+		level.Error(logger).Log("error", err.Error())
 		return
 	}
 
 	http.HandleFunc("/read", func(w http.ResponseWriter, r *http.Request) {
-		logger.Log("debug", "serving query")
+		level.Debug(logger).Log("msg", "serving query")
 		req, err := remote.DecodeReadRequest(r)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -62,7 +60,7 @@ func startServer(configFile string) {
 		return
 	})
 
-	logger.Log("msg", "starting server")
+	level.Info(logger).Log("msg", "starting server")
 	http.ListenAndServe(":9091", nil)
 }
 

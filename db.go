@@ -12,6 +12,7 @@ import (
 
 	"github.com/coreos/etcd/pkg/fileutil"
 	"github.com/go-kit/kit/log"
+	"github.com/go-kit/kit/log/level"
 	minio "github.com/minio/minio-go"
 	"github.com/oklog/ulid"
 	"github.com/pkg/errors"
@@ -59,8 +60,6 @@ func NewDB(rcfg remoteConfig, mc *minio.Client, logger log.Logger) (*DB, error) 
 }
 
 func (s *DB) run(d time.Duration) {
-	logger := log.With(s.logger, "caller", "s.run()")
-
 	t := time.Tick(d)
 	for _ = range t {
 		m := make(map[string]struct{})
@@ -72,10 +71,10 @@ func (s *DB) run(d time.Duration) {
 
 		blocks, err := getStorageBlocks(s.client, s.bucket)
 		if err != nil {
-			logger.Log("error", err.Error())
+			level.Error(s.logger).Log("error", err.Error())
 			continue
 		}
-		logger.Log("debug", "checking for new blocks.", "localBlocks", len(m), "remoteBlocks", len(blocks))
+		level.Debug(s.logger).Log("msg", "checking for new blocks.", "localBlocks", len(m), "remoteBlocks", len(blocks))
 
 		newBlocks := 0
 		for _, b := range blocks {
@@ -87,30 +86,27 @@ func (s *DB) run(d time.Duration) {
 			tmpFolder := folder + ".tmp"
 
 			if err := os.RemoveAll(tmpFolder); err != nil {
-				logger.Log("msg", "removing any existing tmpFolder", "error", err.Error())
+				level.Error(s.logger).Log("msg", "removing any existing tmpFolder", "error", err.Error())
 				continue
 			}
 
 			// Download the meta and index files.
 			if err := s.client.FGetObject(s.bucket, b+indexSuffix, filepath.Join(tmpFolder, indexSuffix)); err != nil {
-				logger.Log("msg", "download index file", "key", b, "error", err.Error())
+				level.Error(s.logger).Log("msg", "download index file", "key", b, "error", err.Error())
 				continue
 			}
 
 			if err := s.client.FGetObject(s.bucket, b+metaSuffix, filepath.Join(tmpFolder, metaSuffix)); err != nil {
-				logger.Log("msg", "download meta file", "error", err.Error())
+				level.Error(s.logger).Log("msg", "download meta file", "error", err.Error())
 				continue
 			}
 
 			if err := renameFile(tmpFolder, folder); err != nil {
-				logger.Log("msg", "rename temp folder", "error", err.Error())
+				level.Error(s.logger).Log("msg", "rename temp folder", "error", err.Error())
 				continue
 			}
 
 			newBlocks++
-			if err := s.reload(); err != nil {
-				logger.Log("msg", "reloading blocks", "error", err.Error())
-			}
 		}
 
 		if newBlocks == 0 {
@@ -119,7 +115,7 @@ func (s *DB) run(d time.Duration) {
 
 		// Check if we need to reload here.
 		if err := s.reload(); err != nil {
-			logger.Log("msg", "reloading blocks", "error", err.Error())
+			level.Error(s.logger).Log("msg", "reloading blocks", "error", err.Error())
 		}
 	}
 }
