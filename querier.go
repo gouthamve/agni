@@ -16,20 +16,23 @@ import (
 // querier aggregates querying results from time blocks within
 // a single partition.
 type querier struct {
+	ctx    context.Context
 	blocks []tsdb.Querier
 }
 
 // Querier returns a new querier over the data partition for the given time range.
 // A goroutine must not handle more than one open Querier.
-func (s *DB) Querier(mint, maxt int64) tsdb.Querier {
+func (s *DB) Querier(ctx context.Context, mint, maxt int64) tsdb.Querier {
 	s.mtx.RLock()
 	sq := &querier{
+		ctx:    ctx,
 		blocks: make([]tsdb.Querier, 0, len(s.blocks)),
 	}
 	for _, b := range s.blocks {
 		// Check interval overlap.
 		if b.Meta().MinTime <= maxt && mint <= b.Meta().MaxTime {
-			sq.blocks = append(sq.blocks, tsdb.NewBlockQuerier(
+			sq.blocks = append(sq.blocks, NewBlockQuerier(
+				ctx,
 				b.Index(),
 				b.Chunks(),
 				b.Tombstones(),
@@ -94,7 +97,7 @@ func (q *querier) Close() error {
 }
 
 // NewBlockQuerier returns a querier against the readers.
-func NewBlockQuerier(ir tsdb.IndexReader, cr ChunkReader, tr tsdb.TombstoneReader, mint, maxt int64) tsdb.Querier {
+func NewBlockQuerier(ctx context.Context, ir tsdb.IndexReader, cr ChunkReader, tr tsdb.TombstoneReader, mint, maxt int64) tsdb.Querier {
 	return &blockQuerier{
 		index:      ir,
 		chunks:     cr,
@@ -112,6 +115,8 @@ type blockQuerier struct {
 	tombstones tsdb.TombstoneReader
 
 	mint, maxt int64
+
+	ctx context.Context
 }
 
 func (q *blockQuerier) Select(ms ...labels.Matcher) tsdb.SeriesSet {
@@ -558,7 +563,6 @@ func populateSeriesInParallel(l []chunkSeries, cr ChunkReader, workers int) erro
 		i := i
 		g.Add(func() error {
 			c := l[i]
-			fmt.Println(c.Labels(), ".")
 			if err := cr.Populate(c.chunks); err != nil {
 				return err
 			}

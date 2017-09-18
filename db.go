@@ -26,7 +26,7 @@ const (
 
 // DB is the TODO struct.
 type DB struct {
-	blocks []tsdb.DiskBlock
+	blocks []*s3Block
 
 	mtx sync.RWMutex
 
@@ -44,7 +44,7 @@ func NewDB(rcfg remoteConfig, mc *minio.Client, logger log.Logger) (*DB, error) 
 	}
 
 	db := &DB{
-		blocks: make([]tsdb.DiskBlock, 0),
+		blocks: make([]*s3Block, 0),
 		client: mc,
 		bucket: rcfg.Bucket,
 		logger: logger,
@@ -120,7 +120,7 @@ func (s *DB) run(d time.Duration) {
 	}
 }
 
-func (db *DB) getBlock(id ulid.ULID) (tsdb.DiskBlock, bool) {
+func (db *DB) getBlock(id ulid.ULID) (*s3Block, bool) {
 	for _, b := range db.blocks {
 		if b.Meta().ULID == id {
 			return b, true
@@ -138,7 +138,7 @@ func (db *DB) reload() error {
 		return errors.Wrap(err, "find blocks")
 	}
 	var (
-		blocks []tsdb.DiskBlock
+		blocks []*s3Block
 		exist  = map[ulid.ULID]struct{}{}
 	)
 
@@ -202,7 +202,7 @@ func isBlockDir(fi os.FileInfo) bool {
 	return err == nil
 }
 
-func validateBlockSequence(bs []tsdb.DiskBlock) error {
+func validateBlockSequence(bs []*s3Block) error {
 	if len(bs) == 0 {
 		return nil
 	}

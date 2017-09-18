@@ -48,7 +48,7 @@ func (b *s3Block) Dir() string {
 	return b.dir
 }
 
-func (b *s3Block) Chunks() tsdb.ChunkReader {
+func (b *s3Block) Chunks() ChunkReader {
 	return b.chunkr
 }
 

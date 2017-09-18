@@ -53,11 +53,11 @@ func (g *Group) Run() error {
 
 	// Start the worker pool.
 	for i := 0; i < g.workers; i++ {
-		go func(fc <-chan func() error, ec chan<- error) {
+		go func(fc <-chan func() error, ec chan<- error, i int) {
 			for f := range fc {
 				ec <- f()
 			}
-		}(fChan, errors)
+		}(fChan, errors, i)
 	}
 
 	// Send work to the workers.

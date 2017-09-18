@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 	minio "github.com/minio/minio-go"
+	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/pkg/errors"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/storage/metric"
@@ -34,6 +36,10 @@ func startServer(configFile string, logger log.Logger) {
 
 	http.HandleFunc("/read", func(w http.ResponseWriter, r *http.Request) {
 		level.Debug(logger).Log("msg", "serving query")
+
+		span, ctx := opentracing.StartSpanFromContext(context.Background(), "read_request")
+		defer span.Finish()
+
 		req, err := remote.DecodeReadRequest(r)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -42,7 +48,7 @@ func startServer(configFile string, logger log.Logger) {
 
 		results := make([]*remote.QueryResult, len(req.Queries))
 		for i, q := range req.Queries {
-			mat, err := queryToMatrix(q, db)
+			mat, err := queryToMatrix(ctx, q, db)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 			}
@@ -64,13 +70,13 @@ func startServer(configFile string, logger log.Logger) {
 	http.ListenAndServe(":9091", nil)
 }
 
-func queryToMatrix(rq *remote.Query, db *DB) (model.Matrix, error) {
+func queryToMatrix(ctx context.Context, rq *remote.Query, db *DB) (model.Matrix, error) {
 	mint, maxt, matchers, err := remote.FromQuery(rq)
 	if err != nil {
 		return nil, err
 	}
 
-	q := db.Querier(int64(mint), int64(maxt))
+	q := db.Querier(ctx, int64(mint), int64(maxt))
 
 	ms := make([]labels.Matcher, 0, len(matchers))
 	for _, m := range matchers {

@@ -169,16 +169,17 @@ func (s *chunkReader) Populate(cs []tsdb.ChunkMeta) error {
 		return errors.Errorf("reference sequence %d out of range", seq)
 	}
 
-	for _, c := range cs {
-		if int(c.Ref>>32) == seq {
-			gp = append(gp, &c)
+	for i := range cs {
+		if int(cs[i].Ref>>32) == seq {
+			gp = append(gp, &cs[i])
 			continue
 		}
 
 		gps = append(gps, gp)
-		seq = int(c.Ref >> 32)
-		gp = []*tsdb.ChunkMeta{&c}
+		seq = int(cs[i].Ref >> 32)
+		gp = []*tsdb.ChunkMeta{&cs[i]}
 	}
+	gps = append(gps, gp)
 
 	g, _ := errgroup.New(context.Background(), len(gps))
 
@@ -194,24 +195,26 @@ func (s *chunkReader) Populate(cs []tsdb.ChunkMeta) error {
 
 var maxChunkLen = 1 << 12
 
+// TODO: Make a note that all chunks should be in the same segment.
 func (s *chunkReader) populate(cs []*tsdb.ChunkMeta) error {
 	if len(cs) == 0 {
 		return nil
 	}
 
 	seq := int(cs[0].Ref >> 32)
-	startRef := int((cs[0].Ref << 32) >> 32)
-	endRef := int((cs[len(cs)-1].Ref<<32)>>32) + maxChunkLen
+	startOff := int((cs[0].Ref << 32) >> 32)
+	endOff := int((cs[len(cs)-1].Ref<<32)>>32) + maxChunkLen
 
 	b := s.bs[seq]
 	oi := s.ois[seq]
-	if int64(endRef) >= oi.Size {
+	if int64(endOff) >= oi.Size {
 		// TODO: start and endRef == int64??
-		endRef = int(oi.Size)
+		endOff = int(oi.Size)
 	}
 
-	buf := make([]byte, endRef-startRef)
-	n, err := b.ReadAt(buf, int64(startRef))
+	buf := make([]byte, endOff-startOff)
+	n, err := b.ReadAt(buf, int64(startOff))
+
 	if err != nil {
 		if err != io.EOF {
 			return err
@@ -226,13 +229,17 @@ func (s *chunkReader) populate(cs []*tsdb.ChunkMeta) error {
 	}
 
 	for _, c := range cs {
-		l, n := binary.Uvarint(buf)
+		// TODO: Inplace shorten buf.
+		ref := int((c.Ref << 32) >> 32)
+		buf2 := buf[ref-startOff:]
+
+		l, n := binary.Uvarint(buf2)
 		if n < 0 {
 			return fmt.Errorf("reading chunk length failed")
 		}
+		buf2 = buf2[n:]
 
-		buf = buf[n:]
-		c.Chunk, err = s.pool.Get(chunks.Encoding(buf[0]), buf[1:1+l])
+		c.Chunk, err = s.pool.Get(chunks.Encoding(buf2[0]), buf2[1:1+l])
 		if err != nil {
 			return err
 		}
