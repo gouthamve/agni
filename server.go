@@ -42,6 +42,7 @@ func startServer(configFile string, logger log.Logger) {
 
 		req, err := remote.DecodeReadRequest(r)
 		if err != nil {
+			level.Error(logger).Log("msg", "decode request", "error", err.Error())
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -50,6 +51,7 @@ func startServer(configFile string, logger log.Logger) {
 		for i, q := range req.Queries {
 			mat, err := queryToMatrix(ctx, q, db)
 			if err != nil {
+				level.Error(logger).Log("msg", "query to matrix", "error", err.Error())
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 			}
 			results[i] = remote.ToQueryResult(mat)
@@ -60,6 +62,7 @@ func startServer(configFile string, logger log.Logger) {
 		}
 
 		if err := remote.EncodReadResponse(&resp, w); err != nil {
+			level.Error(logger).Log("msg", "encode read response", "error", err.Error())
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 

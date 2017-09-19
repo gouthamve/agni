@@ -52,7 +52,7 @@ func NewDB(rcfg remoteConfig, mc *minio.Client, logger log.Logger) (*DB, error) 
 	}
 
 	if err := db.reload(); err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "db reload")
 	}
 
 	go db.run(1 * time.Minute)

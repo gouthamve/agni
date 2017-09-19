@@ -7,6 +7,7 @@ import (
 	"io"
 	"sort"
 
+	"github.com/gouthamve/agni/pkg/chunkr"
 	"github.com/gouthamve/agni/pkg/errgroup"
 	minio "github.com/minio/minio-go"
 	"github.com/pkg/errors"
@@ -36,14 +37,14 @@ type ChunkReader interface {
 // of series data.
 type chunkReader struct {
 	// The underlying bytes holding the encoded series data.
-	bs  []*minio.Object
+	bs  []chunkr.Reader
 	ois []minio.ObjectInfo
 
 	pool chunks.Pool
 }
 
 // newChunkReader returns a new chunkReader based on mmaped files found in dir.
-func newChunkReader(mc *minio.Client, bucket, block string, pool chunks.Pool) (*chunkReader, error) {
+func newChunkReader(mc *minio.Client, bucket, block string, pool chunks.Pool, rp chunkr.ReaderProvider) (*chunkReader, error) {
 	doneCh := make(chan struct{})
 	keys := make([]string, 0)
 	objCh := mc.ListObjectsV2(bucket, block+chunkSuffix, false, doneCh)
@@ -61,30 +62,31 @@ func newChunkReader(mc *minio.Client, bucket, block string, pool chunks.Pool) (*
 	if pool == nil {
 		pool = chunks.NewPool()
 	}
-	cr := chunkReader{bs: make([]*minio.Object, 0, len(keys)), pool: pool}
+	cr := chunkReader{bs: make([]chunkr.Reader, 0, len(keys)), pool: pool}
 
-	for _, key := range keys {
+	for i, key := range keys {
 		obj, err := mc.GetObject(bucket, key)
 		if err != nil {
 			return nil, errors.Wrapf(err, "read chunks: %q", key)
 		}
 
-		cr.bs = append(cr.bs, obj)
-	}
-
-	cr.ois = make([]minio.ObjectInfo, 0, len(cr.bs))
-	for i, b := range cr.bs {
-		oi, err := b.Stat()
+		oi, err := obj.Stat()
 		if err != nil {
 			return nil, errors.Wrap(err, "read object stats")
 		}
+
+		r, err := rp.Reader(obj)
+		if err != nil {
+			return nil, errors.Wrap(err, "get chunkr.Reader from minio.Object")
+		}
+		cr.bs = append(cr.bs, r)
 
 		if oi.Size < 4 {
 			return nil, errors.Wrapf(errInvalidSize, "validate magic in segment %d", i)
 		}
 		// Verify magic number.
 		buf := make([]byte, 4)
-		_, err = b.Read(buf)
+		_, err = obj.Read(buf)
 		if err != nil {
 			return nil, err
 		}
@@ -208,7 +210,7 @@ func (s *chunkReader) populate(cs []*tsdb.ChunkMeta) error {
 	b := s.bs[seq]
 	oi := s.ois[seq]
 	if int64(endOff) >= oi.Size {
-		// TODO: start and endRef == int64??
+		// TODO: start and endRef to int64??
 		endOff = int(oi.Size)
 	}
 
@@ -241,7 +243,7 @@ func (s *chunkReader) populate(cs []*tsdb.ChunkMeta) error {
 
 		c.Chunk, err = s.pool.Get(chunks.Encoding(buf2[0]), buf2[1:1+l])
 		if err != nil {
-			return err
+			return errors.Wrapf(err, "get chunk from pool, enc: %d, ref: %d", buf2[0], ref)
 		}
 	}
 

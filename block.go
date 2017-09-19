@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/gouthamve/agni/pkg/chunkr"
 	minio "github.com/minio/minio-go"
 	"github.com/pkg/errors"
 	"github.com/prometheus/tsdb"
@@ -32,7 +33,8 @@ func newS3Block(mc *minio.Client, bucket, key, dir string) (*s3Block, error) {
 		return nil, err
 	}
 
-	sb.chunkr, err = newChunkReader(mc, bucket, key, nil)
+	sb.chunkr, err = newChunkReader(mc, bucket, key, nil, chunkr.NewGCProvider(mc, bucket, 4<<20))
+	//sb.chunkr, err = newChunkReader(mc, bucket, key, nil, chunkr.SimpleRP{})
 	if err != nil {
 		return nil, errors.Wrap(err, "new chunk reader")
 	}
