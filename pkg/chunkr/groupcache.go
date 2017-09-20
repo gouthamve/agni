@@ -9,7 +9,21 @@ import (
 	"github.com/golang/groupcache"
 	minio "github.com/minio/minio-go"
 	"github.com/pkg/errors"
+	"github.com/prometheus/client_golang/prometheus"
 )
+
+// TODO: Move away from globals.
+var (
+	s3Reqs = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "agni",
+		Name:      "s3_reqs_total",
+		Help:      "The total number of requests to S3",
+	})
+)
+
+func init() {
+	prometheus.MustRegister(s3Reqs)
+}
 
 type GCProvider struct {
 	g *groupcache.Group
@@ -33,6 +47,7 @@ func NewGCProvider(mc *minio.Client, bucket string, chunkSize int64) ReaderProvi
 					return errors.Wrap(err, "converting offset to string")
 				}
 
+				s3Reqs.Inc()
 				obj, err := mc.GetObject(bucket, ss[0])
 				if err != nil {
 					return errors.Wrapf(err, "get object: %s", ss[0])
@@ -50,6 +65,11 @@ func NewGCProvider(mc *minio.Client, bucket string, chunkSize int64) ReaderProvi
 				return errors.Wrap(dest.SetBytes(b), "put into dest")
 			},
 		))
+
+		// TODO: Is this the right place to put it?
+		if err := registerMetrics(g); err != nil {
+			panic(err)
+		}
 	}
 	return GCProvider{g: g, chunkSize: chunkSize}
 }
@@ -106,3 +126,128 @@ func (gcr *GCReader) ReadAt(b []byte, offset int64) (int, error) {
 }
 
 func (gcr *GCReader) Close() error { return gcr.obj.Close() }
+
+func registerMetrics(g *groupcache.Group) error {
+	// TODO: Make this a collector.
+	if err := prometheus.Register(prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Namespace: "groupcache",
+			Subsystem: "main",
+			Name:      "bytes_stored",
+			Help:      "The bytes stored in the main cache.",
+		},
+		func() float64 { return float64(g.CacheStats(groupcache.MainCache).Bytes) },
+	)); err != nil {
+		return err
+	}
+
+	if err := prometheus.Register(prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Namespace: "groupcache",
+			Subsystem: "main",
+			Name:      "items_stored",
+			Help:      "The number of items stored in the main cache.",
+		},
+		func() float64 { return float64(g.CacheStats(groupcache.MainCache).Items) },
+	)); err != nil {
+		return err
+	}
+
+	if err := prometheus.Register(prometheus.NewCounterFunc(
+		prometheus.CounterOpts{
+			Namespace: "groupcache",
+			Subsystem: "main",
+			Name:      "gets_total",
+			Help:      "The total number of get reqs served.",
+		},
+		func() float64 { return float64(g.CacheStats(groupcache.MainCache).Gets) },
+	)); err != nil {
+		return err
+	}
+
+	if err := prometheus.Register(prometheus.NewCounterFunc(
+		prometheus.CounterOpts{
+			Namespace: "groupcache",
+			Subsystem: "main",
+			Name:      "hits_total",
+			Help:      "The total number of requests where the key was in cache.",
+		},
+		func() float64 { return float64(g.CacheStats(groupcache.MainCache).Hits) },
+	)); err != nil {
+		return err
+	}
+
+	if err := prometheus.Register(prometheus.NewCounterFunc(
+		prometheus.CounterOpts{
+			Namespace: "groupcache",
+			Subsystem: "main",
+			Name:      "evictions_total",
+			Help:      "The total number of keys evicted.",
+		},
+		func() float64 { return float64(g.CacheStats(groupcache.MainCache).Evictions) },
+	)); err != nil {
+		return err
+	}
+
+	if err := prometheus.Register(prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Namespace: "groupcache",
+			Subsystem: "hot",
+			Name:      "bytes_stored",
+			Help:      "The bytes stored in the hot cache.",
+		},
+		func() float64 { return float64(g.CacheStats(groupcache.HotCache).Bytes) },
+	)); err != nil {
+		return err
+	}
+
+	if err := prometheus.Register(prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Namespace: "groupcache",
+			Subsystem: "hot",
+			Name:      "items_stored",
+			Help:      "The number of items stored in the hot cache.",
+		},
+		func() float64 { return float64(g.CacheStats(groupcache.HotCache).Items) },
+	)); err != nil {
+		return err
+	}
+
+	if err := prometheus.Register(prometheus.NewCounterFunc(
+		prometheus.CounterOpts{
+			Namespace: "groupcache",
+			Subsystem: "hot",
+			Name:      "gets_total",
+			Help:      "The total number of get reqs served.",
+		},
+		func() float64 { return float64(g.CacheStats(groupcache.HotCache).Gets) },
+	)); err != nil {
+		return err
+	}
+
+	if err := prometheus.Register(prometheus.NewCounterFunc(
+		prometheus.CounterOpts{
+			Namespace: "groupcache",
+			Subsystem: "hot",
+			Name:      "hits_total",
+			Help:      "The total number of requests where the key was in cache.",
+		},
+		func() float64 { return float64(g.CacheStats(groupcache.HotCache).Hits) },
+	)); err != nil {
+		return err
+	}
+
+	if err := prometheus.Register(prometheus.NewCounterFunc(
+		prometheus.CounterOpts{
+			Namespace: "groupcache",
+			Subsystem: "hot",
+			Name:      "evictions_total",
+			Help:      "The total number of keys evicted.",
+		},
+		func() float64 { return float64(g.CacheStats(groupcache.HotCache).Evictions) },
+	)); err != nil {
+		return err
+	}
+
+	return nil
+}

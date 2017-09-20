@@ -3,12 +3,15 @@ package main
 import (
 	"context"
 	"net/http"
+	_ "net/http/pprof"
 
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 	minio "github.com/minio/minio-go"
 	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/pkg/errors"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/storage/metric"
 	"github.com/prometheus/prometheus/storage/remote"
@@ -34,43 +37,57 @@ func startServer(configFile string, logger log.Logger) {
 		return
 	}
 
-	http.HandleFunc("/read", func(w http.ResponseWriter, r *http.Request) {
-		level.Debug(logger).Log("msg", "serving query")
+	h := &handler{
+		db:     db,
+		logger: log.With(logger, "component", "web-handler"),
+	}
 
-		span, ctx := opentracing.StartSpanFromContext(context.Background(), "read_request")
-		defer span.Finish()
-
-		req, err := remote.DecodeReadRequest(r)
-		if err != nil {
-			level.Error(logger).Log("msg", "decode request", "error", err.Error())
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		results := make([]*remote.QueryResult, len(req.Queries))
-		for i, q := range req.Queries {
-			mat, err := queryToMatrix(ctx, q, db)
-			if err != nil {
-				level.Error(logger).Log("msg", "query to matrix", "error", err.Error())
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-			}
-			results[i] = remote.ToQueryResult(mat)
-		}
-
-		resp := remote.ReadResponse{
-			Results: results,
-		}
-
-		if err := remote.EncodReadResponse(&resp, w); err != nil {
-			level.Error(logger).Log("msg", "encode read response", "error", err.Error())
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
-
-		return
-	})
+	http.HandleFunc("/read", prometheus.InstrumentHandlerFunc("read", h.remoteReadHandler))
+	http.Handle("/metrics", promhttp.Handler())
 
 	level.Info(logger).Log("msg", "starting server")
 	http.ListenAndServe(":9091", nil)
+}
+
+type handler struct {
+	db *DB
+
+	logger log.Logger
+}
+
+func (h *handler) remoteReadHandler(w http.ResponseWriter, r *http.Request) {
+	level.Debug(h.logger).Log("msg", "serving query")
+
+	span, ctx := opentracing.StartSpanFromContext(context.Background(), "read_request")
+	defer span.Finish()
+
+	req, err := remote.DecodeReadRequest(r)
+	if err != nil {
+		level.Error(h.logger).Log("msg", "decode request", "error", err.Error())
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	results := make([]*remote.QueryResult, len(req.Queries))
+	for i, q := range req.Queries {
+		mat, err := queryToMatrix(ctx, q, h.db)
+		if err != nil {
+			level.Error(h.logger).Log("msg", "query to matrix", "error", err.Error())
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		results[i] = remote.ToQueryResult(mat)
+	}
+
+	resp := remote.ReadResponse{
+		Results: results,
+	}
+
+	if err := remote.EncodReadResponse(&resp, w); err != nil {
+		level.Error(h.logger).Log("msg", "encode read response", "error", err.Error())
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+
+	return
 }
 
 func queryToMatrix(ctx context.Context, rq *remote.Query, db *DB) (model.Matrix, error) {
