@@ -14,11 +14,110 @@ import (
 	minio "github.com/minio/minio-go"
 	"github.com/pkg/errors"
 	"github.com/prometheus/tsdb"
+	"gopkg.in/fsnotify.v1"
 )
 
 var prefix = "promblock-"
 
-func startShipper(configFile string, logger log.Logger) {
+func isValidBlockDir(dirName string, bd os.FileInfo, logger log.Logger) bool {
+	if !isBlockDir(bd) {
+		return false
+	}
+
+	byt, err := ioutil.ReadFile(filepath.Join(dirName, bd.Name(), "meta.json"))
+	if err != nil {
+		level.Error(logger).Log("msg", "check block dir", "error", err.Error())
+		return false
+	}
+
+	var bm tsdb.BlockMeta
+	if err := json.Unmarshal(byt, &bm); err != nil {
+		level.Error(logger).Log("msg", "check block dir", "error", err.Error())
+		return false
+	}
+
+	if bm.Compaction.Level == 1 {
+		return true
+	}
+
+	return false
+}
+
+func refresh(dirName string, logger log.Logger) []string {
+
+	blockDirs, err := ioutil.ReadDir(dirName)
+	if err != nil {
+		level.Error(logger).Log("error", err.Error())
+		os.Exit(1)
+	}
+
+	blocks := make([]string, 0, len(blockDirs))
+	for _, bd := range blockDirs {
+		if !isValidBlockDir(dirName, bd, logger) {
+			continue
+		}
+
+		blocks = append(blocks, filepath.Join(dirName, bd.Name()))
+
+	}
+	return blocks
+}
+
+func hardlink(blockDir string, lazyDataDir string, logger log.Logger) {
+	fnameSplit := strings.Split(blockDir, "/")
+	bName := fnameSplit[len(fnameSplit)-1]
+
+	lazyBlockDir := filepath.Join(lazyDataDir, bName)
+	if _, err := os.Stat(lazyBlockDir); !os.IsNotExist(err) {
+		return
+	}
+
+	if err := os.MkdirAll(lazyBlockDir, 0777); err != nil {
+		level.Error(logger).Log("msg", "creation of lazy block dir", "error", err.Error())
+	}
+
+	lazyChunksDir := filepath.Join(lazyBlockDir, "chunks")
+	if err := os.MkdirAll(lazyChunksDir, 0777); err != nil {
+		level.Error(logger).Log("msg", "creation of lazy chunks dir", "error", err.Error())
+	}
+
+	// Hardlink meta, index and tombstones
+	for _, fname := range []string{
+		metaSuffix,
+		indexSuffix,
+		//tombstoneFilename,
+	} {
+		if err := os.Link(filepath.Join(blockDir, fname), filepath.Join(lazyBlockDir, fname)); err != nil {
+			level.Error(logger).Log("msg", "hardlink", "error", err.Error())
+		}
+	}
+
+	// Hardlink chunks
+	ChunkDir := filepath.Join(blockDir, "chunks")
+	files, err := ioutil.ReadDir(ChunkDir)
+	if err != nil {
+		level.Error(logger).Log("msg", "read chunksDir", "error", err.Error())
+	}
+
+	for _, f := range files {
+		err := os.Link(filepath.Join(ChunkDir, f.Name()), filepath.Join(lazyChunksDir, f.Name()))
+		if err != nil {
+			level.Error(logger).Log("msg", "hardlink chunks", "error", err.Error())
+		}
+	}
+
+}
+
+func stopLazyShip(done chan bool) {
+	done <- true
+}
+
+func closeShipper(tempDir string, logger log.Logger) {
+	os.RemoveAll(tempDir)
+	level.Error(logger).Log("msg", "closing the shipper ...")
+}
+
+func startShipper(configFile string, logger log.Logger, dataDir string, tempDir string) {
 	if logger == nil {
 		logger = log.NewNopLogger()
 	}
@@ -41,49 +140,22 @@ func startShipper(configFile string, logger log.Logger) {
 		os.Exit(1)
 	}
 
+	endLazyShipper := make(chan bool)
+
+	go s.lazyShipper(dataDir, tempDir, logger, endLazyShipper)
+	defer stopLazyShip(endLazyShipper)
+
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
+
 	for range ticker.C {
-		blockDirs, err := ioutil.ReadDir(".")
-		if err != nil {
-			level.Error(logger).Log("error", err.Error())
-			os.Exit(1)
-		}
-		blocks := make([]string, 0, len(blockDirs))
-		for _, bd := range blockDirs {
-			if bd.Name() == "wal" {
-				continue
-			}
-
-			if strings.HasSuffix(bd.Name(), ".tmp") {
-				continue
-			}
-			if !bd.IsDir() {
-				continue
-			}
-
-			byt, err := ioutil.ReadFile(filepath.Join(bd.Name(), "meta.json"))
-			if err != nil {
-				level.Error(logger).Log("msg", "load config", "error", err.Error())
-				os.Exit(1)
-			}
-
-			var bm tsdb.BlockMeta
-			if err := json.Unmarshal(byt, &bm); err != nil {
-				level.Error(logger).Log("msg", "load config", "error", err.Error())
-				os.Exit(1)
-			}
-
-			if bm.Compaction.Level == 1 {
-				blocks = append(blocks, bd.Name())
-			}
-		}
+		blocks := refresh(tempDir, logger)
 
 		if err := s.shipBlocks(blocks); err != nil {
-			level.Error(logger).Log("msg", "load config", "error", err.Error())
-			os.Exit(1)
+			level.Error(logger).Log("msg", "shipping blocks", "error", err.Error())
 		}
 	}
+
 }
 
 type shipper struct {
@@ -114,13 +186,79 @@ func newShipper(mc *minio.Client, bucket string, logger log.Logger) (*shipper, e
 	}, nil
 }
 
+func (s *shipper) lazyShipper(dataDir string, lazyDataDir string, logger log.Logger, done <-chan bool) {
+	watcher, err := fsnotify.NewWatcher()
+	defer watcher.Close()
+	if err != nil {
+		level.Error(logger).Log("msg", "initialise watcher on data dir", "error", err.Error())
+	}
+	watcher.Add(dataDir)
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case event := <-watcher.Events:
+
+			if event.Op&fsnotify.Create != fsnotify.Create {
+				break
+			}
+
+			blockDirs := refresh(dataDir, logger)
+
+			for _, blockDir := range blockDirs {
+
+				fnameSplit := strings.Split(blockDir, "/")
+				bName := fnameSplit[len(fnameSplit)-1]
+
+				if _, ok := s.blocks[bName]; ok {
+					continue
+				}
+
+				hardlink(blockDir, lazyDataDir, logger)
+			}
+
+			ticker.Stop()
+			ticker = time.NewTicker(5 * time.Second)
+
+		case <-ticker.C:
+			blockDirs := refresh(dataDir, logger)
+
+			for _, blockDir := range blockDirs {
+
+				fnameSplit := strings.Split(blockDir, "/")
+				bName := fnameSplit[len(fnameSplit)-1]
+
+				if _, ok := s.blocks[bName]; ok {
+					continue
+				}
+
+				hardlink(blockDir, lazyDataDir, logger)
+			}
+
+		case err := <-watcher.Errors:
+			if err != nil {
+				level.Error(logger).Log("msg", "watcher on dataDir", "error", err.Error())
+			}
+
+		case <-done:
+			return
+
+		}
+	}
+}
+
 func (s *shipper) shipBlocks(blocks []string) error {
 	for _, block := range blocks {
-		if _, ok := s.blocks[block]; ok {
+		fnameSplit := strings.Split(block, "/")
+		bName := fnameSplit[len(fnameSplit)-1]
+
+		if _, ok := s.blocks[bName]; ok {
 			continue
 		}
 
-		blockKey := reverse(block)
+		blockKey := reverse(bName)
 
 		// Put chunks.
 		chunksPath := filepath.Join(block, "chunks")
@@ -178,7 +316,9 @@ func (s *shipper) shipBlocks(blocks []string) error {
 		}
 
 		level.Info(s.logger).Log("msg", fmt.Sprintf("added block %q\n", blockKey))
-		s.blocks[block] = struct{}{}
+		s.blocks[bName] = struct{}{}
+
+		os.RemoveAll(block)
 	}
 
 	return nil
