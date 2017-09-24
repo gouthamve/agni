@@ -5,7 +5,9 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/go-kit/kit/log/level"
@@ -35,6 +37,7 @@ func main() {
 
 	promlogflag.AddFlags(a, &cfg.logLevel)
 	shipperCmd := a.Command("shipper", "Ship the blocks off a S3 based block store.")
+	dataDir := shipperCmd.Arg("data-dir", "Path to data directory.").Required().String()
 	serverCmd := a.Command("server", "Run a server that reads data off S3.")
 
 	switch kingpin.MustParse(a.Parse(os.Args[1:])) {
@@ -49,7 +52,21 @@ func main() {
 		opentracing.SetGlobalTracer(tracer)
 		defer closer.Close()
 
-		startShipper(cfg.configFile, logger)
+		tempDir, err := ioutil.TempDir("", "tempData")
+		if err != nil {
+			level.Error(logger).Log("msg", "creation of temporary directory", "error", err.Error())
+		}
+
+		go startShipper(cfg.configFile, logger, *dataDir, tempDir)
+		term := make(chan os.Signal)
+		signal.Notify(term, os.Interrupt, syscall.SIGTERM)
+		select {
+		case <-term:
+			level.Error(logger).Log("msg", "Received SIGTERM, exiting gracefully...")
+			closeShipper(tempDir, logger)
+			return
+		}
+
 	case serverCmd.FullCommand():
 		logger := promlog.New(cfg.logLevel)
 		startServer(cfg.configFile, logger)
