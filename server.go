@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	_ "net/http/pprof"
+	"net/url"
 
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
@@ -13,12 +14,17 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/common/model"
+	"github.com/prometheus/common/route"
+	promconfig "github.com/prometheus/prometheus/config"
+	"github.com/prometheus/prometheus/promql"
+	"github.com/prometheus/prometheus/retrieval"
 	"github.com/prometheus/prometheus/storage/metric"
 	"github.com/prometheus/prometheus/storage/remote"
+	"github.com/prometheus/prometheus/web/api/v1"
 	"github.com/prometheus/tsdb/labels"
 )
 
-func startServer(configFile string, logger log.Logger) {
+func startServer(configFile string, queryTimeout model.Duration, logger log.Logger) {
 	rcfg, err := loadConfig(configFile)
 	if err != nil {
 		level.Error(logger).Log("error", err.Error())
@@ -44,6 +50,20 @@ func startServer(configFile string, logger log.Logger) {
 
 	http.HandleFunc("/read", prometheus.InstrumentHandlerFunc("read", h.remoteReadHandler))
 	http.Handle("/metrics", promhttp.Handler())
+
+	// Add the Prometheus API.
+	qe := promql.NewEngine(db, &promql.EngineOptions{
+		MaxConcurrentQueries: 100,
+		Timeout:              queryTimeout,
+		Logger:               log.With(logger, "component", "promAPI"),
+	})
+	api := v1.NewAPI(qe, db, dummyRetreiver{}, dummyRetreiver{}, cfgFunc)
+	r := route.New(
+		func(r *http.Request) (context.Context, error) { return r.Context(), nil },
+	)
+	api.Register(r)
+
+	http.Handle("/api/prom/api/v1", r)
 
 	level.Info(logger).Log("msg", "starting server")
 	http.ListenAndServe(":9091", nil)
@@ -164,3 +184,10 @@ func getMetricFromLabels(ls labels.Labels) model.Metric {
 
 	return m
 }
+
+type dummyRetreiver struct{}
+
+func (dummyRetreiver) Alertmanagers() []*url.URL    { return nil }
+func (dummyRetreiver) Targets() []*retrieval.Target { return nil }
+
+func cfgFunc() promconfig.Config { return promconfig.Config{} }

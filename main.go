@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-kit/kit/log/level"
 	opentracing "github.com/opentracing/opentracing-go"
+	"github.com/prometheus/common/model"
 	"github.com/prometheus/common/promlog"
 	promlogflag "github.com/prometheus/common/promlog/flag"
 	"github.com/uber/jaeger-client-go/config"
@@ -20,8 +21,9 @@ import (
 
 func main() {
 	cfg := struct {
-		configFile string
-		logLevel   promlog.AllowedLevel
+		configFile   string
+		logLevel     promlog.AllowedLevel
+		queryTimeout model.Duration
 
 		tracer string
 	}{}
@@ -34,6 +36,9 @@ func main() {
 
 	a.Flag("tracer.type", "tracer backend.").
 		Default("noop").StringVar(&cfg.tracer)
+
+	a.Flag("query.timeout", "Maximum time a query may take before being aborted.").
+		Default("20m").SetValue(&cfg.queryTimeout)
 
 	promlogflag.AddFlags(a, &cfg.logLevel)
 	shipperCmd := a.Command("shipper", "Ship the blocks off a S3 based block store.")
@@ -69,7 +74,7 @@ func main() {
 
 	case serverCmd.FullCommand():
 		logger := promlog.New(cfg.logLevel)
-		startServer(cfg.configFile, logger)
+		startServer(cfg.configFile, cfg.queryTimeout, logger)
 	}
 }
 
