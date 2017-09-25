@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/golang/groupcache"
+	"github.com/golang/protobuf/proto"
 	minio "github.com/minio/minio-go"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
@@ -100,6 +101,7 @@ func (gcr *GCReader) Read(b []byte) (int, error) {
 
 func (gcr *GCReader) ReadAt(b []byte, offset int64) (int, error) {
 	twoChunks := false
+	readLen := len(b)
 
 	chunkStart := (offset / gcr.chunkSize) * gcr.chunkSize
 	if chunkStart+gcr.chunkSize < offset+int64(len(b)) {
@@ -107,25 +109,51 @@ func (gcr *GCReader) ReadAt(b []byte, offset int64) (int, error) {
 	}
 
 	key := fmt.Sprintf("%s-%d", gcr.key, chunkStart)
-	var byt []byte // TODO: Can we preallocate?
-	if err := gcr.g.Get(nil, key, groupcache.AllocatingByteSliceSink(&byt)); err != nil {
+	if err := gcr.g.Get(nil, key, newPartialByteSliceSink(offset-chunkStart, &b)); err != nil {
 		return 0, errors.Wrapf(err, "read from groupcache, key: %s", key)
 	}
 
 	if twoChunks {
 		key = fmt.Sprintf("%s-%d", gcr.key, chunkStart+gcr.chunkSize)
-		var b2 []byte
-		if err := gcr.g.Get(nil, key, groupcache.AllocatingByteSliceSink(&b2)); err != nil {
+		b2 := make([]byte, readLen-len(b))
+		if err := gcr.g.Get(nil, key, newPartialByteSliceSink(0, &b2)); err != nil {
 			return 0, errors.Wrapf(err, "read from groupcache, key: %s", key)
 		}
 
-		byt = append(byt, b2...)
+		b = append(b, b2...)
 	}
 
-	return copy(b, byt[offset-chunkStart:]), nil
+	return len(b), nil
 }
 
 func (gcr *GCReader) Close() error { return gcr.obj.Close() }
+
+type partialByteSliceSink struct {
+	offset int64
+	b      *[]byte
+}
+
+func newPartialByteSliceSink(offset int64, b *[]byte) *partialByteSliceSink {
+	return &partialByteSliceSink{offset, b}
+}
+
+func (p *partialByteSliceSink) SetString(_ string) error {
+	return errors.New("op not supported")
+}
+
+func (p *partialByteSliceSink) SetProto(_ proto.Message) error {
+	return errors.New("op not supported")
+}
+
+func (p *partialByteSliceSink) SetBytes(v []byte) error {
+	if len(v) < p.offset {
+		return errors.New("the cache is too small.")
+	}
+
+	n := copy(*p.b, v[p.offset:])
+	*p.b = *p.b[:n]
+	return nil
+}
 
 func registerMetrics(g *groupcache.Group) error {
 	// TODO: Make this a collector.
