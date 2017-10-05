@@ -82,7 +82,7 @@ func (h *handler) remoteReadHandler(w http.ResponseWriter, r *http.Request) {
 		Results: results,
 	}
 
-	if err := remote.EncodReadResponse(&resp, w); err != nil {
+	if err := remote.EncodeReadResponse(&resp, w); err != nil {
 		level.Error(h.logger).Log("msg", "encode read response", "error", err.Error())
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}

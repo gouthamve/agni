@@ -27,10 +27,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/coreos/etcd/pkg/fileutil"
+	"github.com/prometheus/tsdb/fileutil"
 	"github.com/go-kit/kit/log"
+	"github.com/go-kit/kit/log/level"
 	"github.com/pkg/errors"
 	"github.com/prometheus/tsdb/labels"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // WALEntryType indicates what data a WAL entry contains.
@@ -64,6 +66,26 @@ type SeriesCB func([]RefSeries) error
 // is only valid until the call returns.
 type DeletesCB func([]Stone) error
 
+type walMetrics struct {
+	fsyncDuration prometheus.Summary
+}
+
+func newWalMetrics(wal *SegmentWAL, r prometheus.Registerer) *walMetrics {
+	m := &walMetrics{}
+
+	m.fsyncDuration = prometheus.NewSummary(prometheus.SummaryOpts{
+		Name: "tsdb_wal_fsync_duration_seconds",
+		Help: "Duration of WAL fsync.",
+	})
+
+	if r != nil {
+		r.MustRegister(
+			m.fsyncDuration,
+		)
+	}
+	return m
+}
+
 // WAL is a write ahead log that can log new series labels and samples.
 // It must be completely read before new entries are logged.
 type WAL interface {
@@ -71,7 +93,7 @@ type WAL interface {
 	LogSeries([]RefSeries) error
 	LogSamples([]RefSample) error
 	LogDeletes([]Stone) error
-	Truncate(int64, Postings) error
+	Truncate(mint int64, keep func(uint64) bool) error
 	Close() error
 }
 
@@ -87,7 +109,7 @@ func (w nopWAL) Reader() WALReader                       { return w }
 func (nopWAL) LogSeries([]RefSeries) error               { return nil }
 func (nopWAL) LogSamples([]RefSample) error              { return nil }
 func (nopWAL) LogDeletes([]Stone) error                  { return nil }
-func (nopWAL) Truncate(int64, Postings) error            { return nil }
+func (nopWAL) Truncate(int64, func(uint64) bool) error   { return nil }
 func (nopWAL) Close() error                              { return nil }
 
 // WALReader reads entries from a WAL.
@@ -99,9 +121,6 @@ type WALReader interface {
 type RefSeries struct {
 	Ref    uint64
 	Labels labels.Labels
-
-	// hash for the label set. This field is not generally populated.
-	hash uint64
 }
 
 // RefSample is a timestamp/value pair associated with a reference to a series.
@@ -152,6 +171,7 @@ func newCRC32() hash.Hash32 {
 // SegmentWAL is a write ahead log for series data.
 type SegmentWAL struct {
 	mtx sync.Mutex
+	metrics *walMetrics
 
 	dirFile *os.File
 	files   []*segmentFile
@@ -171,7 +191,7 @@ type SegmentWAL struct {
 
 // OpenSegmentWAL opens or creates a write ahead log in the given directory.
 // The WAL must be read completely before new data is written.
-func OpenSegmentWAL(dir string, logger log.Logger, flushInterval time.Duration) (*SegmentWAL, error) {
+func OpenSegmentWAL(dir string, logger log.Logger, flushInterval time.Duration, r prometheus.Registerer) (*SegmentWAL, error) {
 	if err := os.MkdirAll(dir, 0777); err != nil {
 		return nil, err
 	}
@@ -192,6 +212,7 @@ func OpenSegmentWAL(dir string, logger log.Logger, flushInterval time.Duration) 
 		segmentSize:   walSegmentSizeBytes,
 		crc32:         newCRC32(),
 	}
+	w.metrics = newWalMetrics(w, r)
 
 	fns, err := sequenceFiles(w.dirFile.Name())
 	if err != nil {
@@ -231,7 +252,7 @@ func (r *repairingWALReader) Read(series SeriesCB, samples SamplesCB, deletes De
 
 // truncate the WAL after the last valid entry.
 func (w *SegmentWAL) truncate(err error, file int, lastOffset int64) error {
-	w.logger.Log("msg", "WAL corruption detected; truncating",
+	level.Error(w.logger).Log("msg", "WAL corruption detected; truncating",
 		"err", err, "file", w.files[file].Name(), "pos", lastOffset)
 
 	// Close and delete all files after the current one.
@@ -275,8 +296,9 @@ func (w *SegmentWAL) putBuffer(b *encbuf) {
 	w.buffers.Put(b)
 }
 
-// Truncate deletes the values prior to mint and the series entries not in p.
-func (w *SegmentWAL) Truncate(mint int64, p Postings) error {
+// Truncate deletes the values prior to mint and the series which the keep function
+// does not indiciate to preserve.
+func (w *SegmentWAL) Truncate(mint int64, keep func(uint64) bool) error {
 	// The last segment is always active.
 	if len(w.files) < 2 {
 		return nil
@@ -317,7 +339,6 @@ func (w *SegmentWAL) Truncate(mint int64, p Postings) error {
 		activeSeries = []RefSeries{}
 	)
 
-Loop:
 	for r.next() {
 		rt, flag, byt := r.at()
 
@@ -331,10 +352,7 @@ Loop:
 		activeSeries = activeSeries[:0]
 
 		for _, s := range series {
-			if !p.Seek(s.Ref) {
-				break Loop
-			}
-			if p.At() == s.Ref {
+			if keep(s.Ref) {
 				activeSeries = append(activeSeries, s)
 			}
 		}
@@ -533,16 +551,16 @@ func (w *SegmentWAL) cut() error {
 		go func() {
 			off, err := hf.Seek(0, os.SEEK_CUR)
 			if err != nil {
-				w.logger.Log("msg", "finish old segment", "segment", hf.Name(), "err", err)
+				level.Error(w.logger).Log("msg", "finish old segment", "segment", hf.Name(), "err", err)
 			}
 			if err := hf.Truncate(off); err != nil {
-				w.logger.Log("msg", "finish old segment", "segment", hf.Name(), "err", err)
+				level.Error(w.logger).Log("msg", "finish old segment", "segment", hf.Name(), "err", err)
 			}
 			if err := hf.Sync(); err != nil {
-				w.logger.Log("msg", "finish old segment", "segment", hf.Name(), "err", err)
+				level.Error(w.logger).Log("msg", "finish old segment", "segment", hf.Name(), "err", err)
 			}
 			if err := hf.Close(); err != nil {
-				w.logger.Log("msg", "finish old segment", "segment", hf.Name(), "err", err)
+				level.Error(w.logger).Log("msg", "finish old segment", "segment", hf.Name(), "err", err)
 			}
 		}()
 	}
@@ -558,7 +576,7 @@ func (w *SegmentWAL) cut() error {
 
 	go func() {
 		if err = w.dirFile.Sync(); err != nil {
-			w.logger.Log("msg", "sync WAL directory", "err", err)
+			level.Error(w.logger).Log("msg", "sync WAL directory", "err", err)
 		}
 	}()
 
@@ -597,7 +615,10 @@ func (w *SegmentWAL) Sync() error {
 	}
 	if head != nil {
 		// But only fsync the head segment after releasing the mutex as it will block on disk I/O.
-		return fileutil.Fdatasync(head.File)
+		start := time.Now()
+		err := fileutil.Fdatasync(head.File)
+		w.metrics.fsyncDuration.Observe(time.Since(start).Seconds())
+		return err
 	}
 	return nil
 }
@@ -609,7 +630,11 @@ func (w *SegmentWAL) sync() error {
 	if w.head() == nil {
 		return nil
 	}
-	return fileutil.Fdatasync(w.head().File)
+
+	start := time.Now()
+	err := fileutil.Fdatasync(w.head().File)
+	w.metrics.fsyncDuration.Observe(time.Since(start).Seconds())
+	return err
 }
 
 func (w *SegmentWAL) flush() error {
@@ -635,7 +660,7 @@ func (w *SegmentWAL) run(interval time.Duration) {
 			return
 		case <-tick:
 			if err := w.Sync(); err != nil {
-				w.logger.Log("msg", "sync failed", "err", err)
+				level.Error(w.logger).Log("msg", "sync failed", "err", err)
 			}
 		}
 	}
@@ -827,7 +852,9 @@ func (r *walReader) Read(seriesf SeriesCB, samplesf SamplesCB, deletesf DeletesC
 			if err != nil {
 				return errors.Wrap(err, "decode series entry")
 			}
-			seriesf(series)
+			if err := seriesf(series); err != nil {
+				return err
+			}
 
 			cf := r.current()
 
@@ -842,7 +869,9 @@ func (r *walReader) Read(seriesf SeriesCB, samplesf SamplesCB, deletesf DeletesC
 			if err != nil {
 				return errors.Wrap(err, "decode samples entry")
 			}
-			samplesf(samples)
+			if err := samplesf(samples); err != nil {
+				return err
+			}
 
 			// Update the times for the WAL segment file.
 			cf := r.current()
@@ -858,7 +887,9 @@ func (r *walReader) Read(seriesf SeriesCB, samplesf SamplesCB, deletesf DeletesC
 			if err != nil {
 				return errors.Wrap(err, "decode delete entry")
 			}
-			deletesf(stones)
+			if err := deletesf(stones); err != nil {
+				return err
+			}
 			// Update the times for the WAL segment file.
 
 			cf := r.current()
