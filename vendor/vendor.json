@@ -287,36 +287,6 @@
 			"revisionTime": "2017-10-05T12:39:11Z"
 		},
 		{
-			"checksumSHA1": "92ebnITjgiMHDu6xEXaanEnGsgU=",
-			"path": "github.com/golang/groupcache",
-			"revision": "b710c8433bd175204919eb38776e944233235d03",
-			"revisionTime": "2017-04-21T00:56:42Z"
-		},
-		{
-			"checksumSHA1": "3KR3qbG0izQxxsSgDon+RNTS0eg=",
-			"path": "github.com/golang/groupcache/consistenthash",
-			"revision": "b710c8433bd175204919eb38776e944233235d03",
-			"revisionTime": "2017-04-21T00:56:42Z"
-		},
-		{
-			"checksumSHA1": "84cSsQkE213Kh38UO/CBlIRaTgM=",
-			"path": "github.com/golang/groupcache/groupcachepb",
-			"revision": "b710c8433bd175204919eb38776e944233235d03",
-			"revisionTime": "2017-04-21T00:56:42Z"
-		},
-		{
-			"checksumSHA1": "nbCxiVT48CWEg6l8L4SEJ5VfN9c=",
-			"path": "github.com/golang/groupcache/lru",
-			"revision": "b710c8433bd175204919eb38776e944233235d03",
-			"revisionTime": "2017-04-21T00:56:42Z"
-		},
-		{
-			"checksumSHA1": "sMvq+9MMLxs/UUdbScCycbg2S9U=",
-			"path": "github.com/golang/groupcache/singleflight",
-			"revision": "b710c8433bd175204919eb38776e944233235d03",
-			"revisionTime": "2017-04-21T00:56:42Z"
-		},
-		{
 			"checksumSHA1": "APDDi2ohrU7OkChQCekD9tSVUhs=",
 			"origin": "github.com/prometheus/prometheus/vendor/github.com/golang/protobuf/jsonpb",
 			"path": "github.com/golang/protobuf/jsonpb",
@@ -349,6 +319,36 @@
 			"path": "github.com/golang/snappy",
 			"revision": "743c64d326412f77b176e44390b8fd546a306a85",
 			"revisionTime": "2017-10-05T12:39:11Z"
+		},
+		{
+			"checksumSHA1": "VRlC8tY6Ri36zAaOKTt76xBFdys=",
+			"path": "github.com/gouthamve/groupcache",
+			"revision": "189723ea578b079ee9a8bb52bc1e2434adbf8501",
+			"revisionTime": "2017-10-08T18:24:43Z"
+		},
+		{
+			"checksumSHA1": "XpFBUL40xTkH+OiYQU1/USKhBYw=",
+			"path": "github.com/gouthamve/groupcache/consistenthash",
+			"revision": "189723ea578b079ee9a8bb52bc1e2434adbf8501",
+			"revisionTime": "2017-10-08T18:24:43Z"
+		},
+		{
+			"checksumSHA1": "ayCKtd3ESkK75eQlfupqKglFk7o=",
+			"path": "github.com/gouthamve/groupcache/groupcachepb",
+			"revision": "189723ea578b079ee9a8bb52bc1e2434adbf8501",
+			"revisionTime": "2017-10-08T18:24:43Z"
+		},
+		{
+			"checksumSHA1": "Jm+bosyjuCRwWvAoXbrMKeLWk/M=",
+			"path": "github.com/gouthamve/groupcache/lru",
+			"revision": "189723ea578b079ee9a8bb52bc1e2434adbf8501",
+			"revisionTime": "2017-10-08T18:24:43Z"
+		},
+		{
+			"checksumSHA1": "2LsCaeARqofKbxM++xCiUp+LQJk=",
+			"path": "github.com/gouthamve/groupcache/singleflight",
+			"revision": "189723ea578b079ee9a8bb52bc1e2434adbf8501",
+			"revisionTime": "2017-10-08T18:24:43Z"
 		},
 		{
 			"checksumSHA1": "/SPy/naO5hgJ9w7uWZurcUm2I88=",

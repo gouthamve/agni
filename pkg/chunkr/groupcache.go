@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/golang/groupcache"
+	"github.com/gouthamve/groupcache"
 	minio "github.com/minio/minio-go"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
@@ -19,6 +19,8 @@ var (
 		Name:      "s3_reqs_total",
 		Help:      "The total number of requests to S3",
 	})
+
+	maxChunkLen = 1 << 11
 )
 
 func init() {
@@ -107,22 +109,22 @@ func (gcr *GCReader) ReadAt(b []byte, offset int64) (int, error) {
 	}
 
 	key := fmt.Sprintf("%s-%d", gcr.key, chunkStart)
-	var byt []byte // TODO: Can we preallocate?
-	if err := gcr.g.Get(nil, key, groupcache.AllocatingByteSliceSink(&byt)); err != nil {
+	byt := make([]byte, maxChunkLen)
+	if err := gcr.g.Get(nil, key, groupcache.TruncatingOffsetByteSliceSink(&byt, int(offset-chunkStart))); err != nil {
 		return 0, errors.Wrapf(err, "read from groupcache, key: %s", key)
 	}
 
 	if twoChunks {
 		key = fmt.Sprintf("%s-%d", gcr.key, chunkStart+gcr.chunkSize)
-		var b2 []byte
-		if err := gcr.g.Get(nil, key, groupcache.AllocatingByteSliceSink(&b2)); err != nil {
+		b := make([]byte, offset+int64(len(b))-(chunkStart+gcr.chunkSize)+1)
+		if err := gcr.g.Get(nil, key, groupcache.TruncatingByteSliceSink(&b2)); err != nil {
 			return 0, errors.Wrapf(err, "read from groupcache, key: %s", key)
 		}
 
 		byt = append(byt, b2...)
 	}
 
-	return copy(b, byt[offset-chunkStart:]), nil
+	return copy(b, byt), nil
 }
 
 func (gcr *GCReader) Close() error { return gcr.obj.Close() }

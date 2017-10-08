@@ -18,6 +18,7 @@ package groupcache
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/golang/protobuf/proto"
 )
@@ -309,6 +310,82 @@ func (s *truncBytesSink) setBytesOwned(b []byte) error {
 }
 
 func (s *truncBytesSink) SetString(v string) error {
+	if s.dst == nil {
+		return errors.New("nil TruncatingByteSliceSink *[]byte dst")
+	}
+	n := copy(*s.dst, v)
+	if n < len(*s.dst) {
+		*s.dst = (*s.dst)[:n]
+	}
+	s.v.b = nil
+	s.v.s = v
+	return nil
+}
+
+// TruncatingOffsetByteSliceSink returns a Sink that writes up to len(*dst)
+// bytes to *dst from src[offset:]. If more bytes are available, they're silently
+// truncated. If fewer bytes are available than len(*dst), *dst
+// is shrunk to fit the number of bytes available.
+func TruncatingOffsetByteSliceSink(dst *[]byte, offset int) Sink {
+	return &truncOffsetBytesSink{dst: dst, offset: offset}
+}
+
+type truncOffsetBytesSink struct {
+	dst    *[]byte
+	offset int
+	v      ByteView
+}
+
+func (s *truncOffsetBytesSink) view() (ByteView, error) {
+	return s.v, nil
+}
+
+func (s *truncOffsetBytesSink) setView(v ByteView) error {
+	if v.b != nil {
+		s.SetBytes(v.b)
+	} else {
+		s.SetBytes([]byte(v.s))
+	}
+	s.v = v
+	return nil
+}
+
+func (s *truncOffsetBytesSink) SetProto(m proto.Message) error {
+	b, err := proto.Marshal(m)
+	if err != nil {
+		return err
+	}
+	return s.setBytesOwned(b, b)
+}
+
+func (s *truncOffsetBytesSink) SetBytes(b []byte) error {
+	if s.offset > len(b) {
+		return fmt.Errorf("offset: %d bigger than value: %d", s.offset, len(b))
+	}
+	end := len(*s.dst) + s.offset
+	if end > len(b) {
+		end = len(b)
+	}
+
+	return s.setBytesOwned(cloneBytes(b[s.offset:end]), b)
+}
+
+// TODO: This is a huuuge hack! We need all bytes to be stored in the cached so
+// we are populating the view wrong.
+func (s *truncOffsetBytesSink) setBytesOwned(populate []byte, view []byte) error {
+	if s.dst == nil {
+		return errors.New("nil TruncatingByteSliceSink *[]byte dst")
+	}
+	n := copy(*s.dst, populate)
+	if n < len(*s.dst) {
+		*s.dst = (*s.dst)[:n]
+	}
+	s.v.b = view
+	s.v.s = ""
+	return nil
+}
+
+func (s *truncOffsetBytesSink) SetString(v string) error {
 	if s.dst == nil {
 		return errors.New("nil TruncatingByteSliceSink *[]byte dst")
 	}
