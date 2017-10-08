@@ -20,8 +20,10 @@ import (
 
 func main() {
 	cfg := struct {
-		configFile string
-		logLevel   promlog.AllowedLevel
+		configFile    string
+		logLevel      promlog.AllowedLevel
+		listenAddress string
+		dataDir       string
 
 		tracer string
 	}{}
@@ -34,6 +36,12 @@ func main() {
 
 	a.Flag("tracer.type", "tracer backend.").
 		Default("noop").StringVar(&cfg.tracer)
+
+	a.Flag("data.dir", "the data directory.").
+		Default("data").StringVar(&cfg.dataDir)
+
+	a.Flag("web.listen-address", "Address to listen on for UI, API, and telemtry.").
+		Default("0.0.0.0:9091").StringVar(&cfg.listenAddress)
 
 	promlogflag.AddFlags(a, &cfg.logLevel)
 	shipperCmd := a.Command("shipper", "Ship the blocks off a S3 based block store.")
@@ -69,7 +77,7 @@ func main() {
 
 	case serverCmd.FullCommand():
 		logger := promlog.New(cfg.logLevel)
-		startServer(cfg.configFile, logger)
+		startServer(cfg.configFile, cfg.dataDir, cfg.listenAddress, logger)
 	}
 }
 

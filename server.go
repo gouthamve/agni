@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	_ "net/http/pprof"
+	"os"
 
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
@@ -18,7 +19,12 @@ import (
 	"github.com/prometheus/tsdb/labels"
 )
 
-func startServer(configFile string, logger log.Logger) {
+func startServer(configFile, dataDir, listenAddress string, logger log.Logger) {
+	if err := os.MkdirAll(dataDir, 0777); err != nil {
+		level.Error(logger).Log("error", err.Error())
+		return
+	}
+
 	rcfg, err := loadConfig(configFile)
 	if err != nil {
 		level.Error(logger).Log("error", err.Error())
@@ -31,7 +37,7 @@ func startServer(configFile string, logger log.Logger) {
 		return
 	}
 
-	db, err := NewDB(rcfg, mc, log.With(logger, "component", "db"))
+	db, err := NewDB(rcfg, dataDir, mc, log.With(logger, "component", "db"))
 	if err != nil {
 		level.Error(logger).Log("error", err.Error())
 		return
@@ -46,7 +52,7 @@ func startServer(configFile string, logger log.Logger) {
 	http.Handle("/metrics", promhttp.Handler())
 
 	level.Info(logger).Log("msg", "starting server")
-	http.ListenAndServe(":9091", nil)
+	http.ListenAndServe(listenAddress, nil)
 }
 
 type handler struct {

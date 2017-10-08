@@ -38,7 +38,7 @@ type DB struct {
 }
 
 // NewDB is TODO stuff.
-func NewDB(rcfg remoteConfig, mc *minio.Client, logger log.Logger) (*DB, error) {
+func NewDB(rcfg remoteConfig, dataDir string, mc *minio.Client, logger log.Logger) (*DB, error) {
 	if logger == nil {
 		logger = log.NewNopLogger()
 	}
@@ -48,7 +48,7 @@ func NewDB(rcfg remoteConfig, mc *minio.Client, logger log.Logger) (*DB, error) 
 		client: mc,
 		bucket: rcfg.Bucket,
 		logger: logger,
-		dir:    "data", // TODO: Make it a parameter.
+		dir:    dataDir,
 	}
 
 	if err := db.reload(); err != nil {
@@ -106,6 +106,7 @@ func (s *DB) run(d time.Duration) {
 				continue
 			}
 
+			level.Debug(s.logger).Log("msg", "added block", "block", b)
 			newBlocks++
 		}
 
