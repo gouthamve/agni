@@ -321,36 +321,6 @@
 			"revisionTime": "2017-10-05T12:39:11Z"
 		},
 		{
-			"checksumSHA1": "VRlC8tY6Ri36zAaOKTt76xBFdys=",
-			"path": "github.com/gouthamve/groupcache",
-			"revision": "189723ea578b079ee9a8bb52bc1e2434adbf8501",
-			"revisionTime": "2017-10-08T18:24:43Z"
-		},
-		{
-			"checksumSHA1": "XpFBUL40xTkH+OiYQU1/USKhBYw=",
-			"path": "github.com/gouthamve/groupcache/consistenthash",
-			"revision": "189723ea578b079ee9a8bb52bc1e2434adbf8501",
-			"revisionTime": "2017-10-08T18:24:43Z"
-		},
-		{
-			"checksumSHA1": "ayCKtd3ESkK75eQlfupqKglFk7o=",
-			"path": "github.com/gouthamve/groupcache/groupcachepb",
-			"revision": "189723ea578b079ee9a8bb52bc1e2434adbf8501",
-			"revisionTime": "2017-10-08T18:24:43Z"
-		},
-		{
-			"checksumSHA1": "Jm+bosyjuCRwWvAoXbrMKeLWk/M=",
-			"path": "github.com/gouthamve/groupcache/lru",
-			"revision": "189723ea578b079ee9a8bb52bc1e2434adbf8501",
-			"revisionTime": "2017-10-08T18:24:43Z"
-		},
-		{
-			"checksumSHA1": "2LsCaeARqofKbxM++xCiUp+LQJk=",
-			"path": "github.com/gouthamve/groupcache/singleflight",
-			"revision": "189723ea578b079ee9a8bb52bc1e2434adbf8501",
-			"revisionTime": "2017-10-08T18:24:43Z"
-		},
-		{
 			"checksumSHA1": "/SPy/naO5hgJ9w7uWZurcUm2I88=",
 			"origin": "github.com/prometheus/prometheus/vendor/github.com/grpc-ecosystem/grpc-gateway/runtime",
 			"path": "github.com/grpc-ecosystem/grpc-gateway/runtime",

@@ -13,6 +13,7 @@ import (
 	"github.com/coreos/etcd/pkg/fileutil"
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
+	"github.com/gouthamve/agni/pkg/chunkr"
 	minio "github.com/minio/minio-go"
 	"github.com/oklog/ulid"
 	"github.com/pkg/errors"
@@ -34,6 +35,8 @@ type DB struct {
 	bucket string
 	dir    string
 
+	rp chunkr.ReaderProvider
+
 	logger log.Logger
 }
 
@@ -43,12 +46,24 @@ func NewDB(rcfg remoteConfig, dataDir string, mc *minio.Client, logger log.Logge
 		logger = log.NewNopLogger()
 	}
 
+	rp, err := chunkr.NewFSCProvider(
+		mc,
+		rcfg.Bucket,
+		"./cache-dir", // Make this configurable.
+		16<<20,        // Chunk size.
+		80<<30,        // The cache size.
+	)
+	if err != nil {
+		return nil, errors.Wrap(err, "creating request provider")
+	}
+
 	db := &DB{
 		blocks: make([]*s3Block, 0),
 		client: mc,
 		bucket: rcfg.Bucket,
 		logger: logger,
 		dir:    dataDir,
+		rp:     rp,
 	}
 
 	if err := db.reload(); err != nil {
@@ -151,7 +166,7 @@ func (db *DB) reload() error {
 
 		b, ok := db.getBlock(meta.ULID)
 		if !ok {
-			b, err = newS3Block(db.client, db.bucket, reverse(meta.ULID.String()), dir)
+			b, err = newS3Block(db.client, db.bucket, reverse(meta.ULID.String()), dir, db.rp)
 			if err != nil {
 				return errors.Wrapf(err, "open block %s", dir)
 			}

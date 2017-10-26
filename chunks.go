@@ -69,6 +69,7 @@ func newChunkReader(mc *minio.Client, bucket, block string, pool chunks.Pool, rp
 		if err != nil {
 			return nil, errors.Wrapf(err, "read chunks: %q", key)
 		}
+		defer obj.Close()
 
 		oi, err := obj.Stat()
 		if err != nil {
@@ -115,7 +116,7 @@ func (s *chunkReader) Chunk(ref uint64) (chunks.Chunk, error) {
 		off = int((ref << 32) >> 32)
 	)
 	if seq >= len(s.bs) {
-		return nil, errors.Errorf("reference sequence %d out of range", seq)
+		return nil, errors.Errorf("reference sequence %d out of range, object: %s", seq, s.ois)
 	}
 	b := s.bs[seq]
 	oi := s.ois[seq]
@@ -138,6 +139,7 @@ func (s *chunkReader) Chunk(ref uint64) (chunks.Chunk, error) {
 
 		if len(buf) == 0 {
 			// TODO: FIXME
+			fmt.Println("Error buf=0", s.ois[seq], ref)
 			continue
 		}
 
@@ -195,7 +197,7 @@ func (s *chunkReader) Populate(cs []tsdb.ChunkMeta) error {
 	return g.Run()
 }
 
-var maxChunkLen = 1 << 12
+var maxChunkLen int64 = 1 << 11
 
 // TODO: Make a note that all chunks should be in the same segment.
 func (s *chunkReader) populate(cs []*tsdb.ChunkMeta) error {
@@ -204,18 +206,13 @@ func (s *chunkReader) populate(cs []*tsdb.ChunkMeta) error {
 	}
 
 	seq := int(cs[0].Ref >> 32)
-	startOff := int((cs[0].Ref << 32) >> 32)
-	endOff := int((cs[len(cs)-1].Ref<<32)>>32) + maxChunkLen
+	startOff := int64((cs[0].Ref << 32) >> 32)
+	endOff := int64((cs[len(cs)-1].Ref<<32)>>32) + maxChunkLen
 
 	b := s.bs[seq]
-	oi := s.ois[seq]
-	if int64(endOff) >= oi.Size {
-		// TODO: start and endRef to int64??
-		endOff = int(oi.Size)
-	}
 
 	buf := make([]byte, endOff-startOff)
-	n, err := b.ReadAt(buf, int64(startOff))
+	n, err := b.ReadAt(buf, startOff)
 
 	if err != nil {
 		if err != io.EOF {
@@ -232,18 +229,18 @@ func (s *chunkReader) populate(cs []*tsdb.ChunkMeta) error {
 
 	for _, c := range cs {
 		// TODO: Inplace shorten buf.
-		ref := int((c.Ref << 32) >> 32)
+		ref := int64((c.Ref << 32) >> 32)
 		buf2 := buf[ref-startOff:]
-
 		l, n := binary.Uvarint(buf2)
 		if n < 0 {
 			return fmt.Errorf("reading chunk length failed")
 		}
+
 		buf2 = buf2[n:]
 
 		c.Chunk, err = s.pool.Get(chunks.Encoding(buf2[0]), buf2[1:1+l])
 		if err != nil {
-			return errors.Wrapf(err, "get chunk from pool, enc: %d, ref: %d", buf2[0], ref)
+			return errors.Wrapf(err, "get chunk from pool, enc: %d, ref: %d, object: %s", buf2[0], c.Ref, s.ois[seq].Key)
 		}
 	}
 
