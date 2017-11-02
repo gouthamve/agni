@@ -11,6 +11,7 @@ import (
 	"github.com/gouthamve/agni/pkg/fscache"
 	minio "github.com/minio/minio-go"
 	"github.com/pkg/errors"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func init() {
@@ -56,6 +57,7 @@ func NewFSCProvider(mc *minio.Client, bucket, cacheDir string, chunkSize, cacheS
 
 			return b, nil
 		},
+		prometheus.DefaultRegisterer,
 	)
 	if err != nil {
 		return nil, errors.Wrap(err, "creating cache")
