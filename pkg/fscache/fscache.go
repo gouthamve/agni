@@ -22,7 +22,7 @@ type Cache struct {
 
 	loadGroup *singleflight.Group
 
-	mtx sync.RWMutex
+	mtx sync.Mutex
 }
 
 type GetterFunc func(key string) ([]byte, error)
@@ -82,13 +82,15 @@ func (c *Cache) Add(key, file string) (bool, error) {
 		return false, errors.Wrapf(err, "mmapping file: %q", file)
 	}
 
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
 	return c.lru.Add(key, Val{b, f}), nil
 }
 
 func (c *Cache) Get(key string) (Val, error) {
 	atomic.AddInt64(&c.stats.Gets, 1)
 
-	v, ok := c.lru.Get(key)
+	v, ok := c.get(key)
 	if ok {
 		atomic.AddInt64(&c.stats.Hits, 1)
 		return v.(Val), nil
@@ -113,7 +115,7 @@ func (c *Cache) Get(key string) (Val, error) {
 		// 2: loadGroup.Do("key", fn)
 		// 2: fn()
 
-		if v, ok := c.lru.Get(key); ok {
+		if v, ok := c.get(key); ok {
 			atomic.AddInt64(&c.stats.Hits, 1)
 			return v.(Val), nil
 		}
@@ -143,11 +145,17 @@ func (c *Cache) Get(key string) (Val, error) {
 			return Val{}, errors.Wrapf(err, "adding cached file to cache, key: %q", key)
 		}
 
-		v, _ = c.lru.Get(key)
+		v, _ = c.get(key)
 		return v, nil
 	})
 
 	return v.(Val), err
+}
+
+func (c *Cache) get(key interface{}) (interface{}, bool) {
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
+	return c.lru.Get(key)
 }
 
 type cacheStats struct {
